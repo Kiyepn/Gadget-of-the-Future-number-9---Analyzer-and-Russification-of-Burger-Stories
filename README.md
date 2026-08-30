@@ -20,7 +20,7 @@ easyocr
 
 
 - чтобы не забыть
-- 1. то нужно запустить cmd / powershell
-  2. эта фигня должна быть на рабочем столе
-  3. cd desktop
-  4. python gadget9.py
+- . то нужно запустить cmd / powershell
+   эта фигня должна быть на рабочем столе
+   cd desktop
+   python gadget9.py
