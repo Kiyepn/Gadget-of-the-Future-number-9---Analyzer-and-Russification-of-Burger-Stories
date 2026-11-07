@@ -14,3 +14,6 @@
 - Pillow
 - easyocr
 
+### Интернет-доступ (DuckDuckGo):
+Если локальная модель встречает неизвестное слово или имя — гаджет ищет его в DuckDuckGo и добавляет найденный контекст в промпт перевода. Настройки в `config.py` (`ENABLE_WEB_SEARCH`, `USE_MODEL_UNKNOWN_CHECK`, `MAX_SEARCH_TERMS`). Кэш найденного хранится в `data/web_cache.json`.
+

@@ -7,6 +7,7 @@ import os
 import threading
 import re
 from brain.memory_engine import format_memory_for_prompt, save_memory, format_characters_for_prompt, save_character, load_characters
+from brain import web_search
 
 GLOSSARY_FILE = os.path.join('data', 'glossary.json')
 
@@ -32,14 +33,80 @@ def format_glossary_for_prompt():
         context += f"- {eng} -> {rus}\n"
     return context
 
+def _unknown_terms_from_model(text):
+    """Спрашивает локальную модель, какие слова ей неизвестны (JSON-массив)."""
+    prompt = (
+        "You are a translation engine for English visual novels. "
+        "Read the OCR text below. List ONLY the words, names or terms that you do NOT "
+        "recognize or cannot confidently translate without external help "
+        "(proper nouns, unusual terms, acronyms, broken OCR fragments). "
+        "Output ONLY a JSON array of strings, for example: [\"Jia Xichun\"]. "
+        "If you understand every word, output an empty array: []\n\n"
+        "Text:\n\"" + text + "\""
+    )
+    try:
+        response = requests.post(config.OLLAMA_URL, json={
+            "model": config.MODEL_NAME,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.0, "num_predict": 120}
+        }, timeout=45)
+        raw = response.json().get('response', '').strip()
+    except Exception:
+        return []
+
+    raw = raw.replace('```json', '').replace('```', '').strip()
+    start, end = raw.find('['), raw.rfind(']')
+    if start == -1 or end <= start:
+        return []
+    try:
+        arr = json.loads(raw[start:end + 1])
+    except Exception:
+        return []
+    return [str(x).strip() for x in arr if str(x).strip()]
+
+
+def _get_web_context(text):
+    """Ищет в DuckDuckGo слова, неизвестные локальной нейронке, и возвращает контекст."""
+    if not config.ENABLE_WEB_SEARCH:
+        return ""
+
+    glossary = load_glossary()
+    terms = web_search.extract_candidate_terms(text)
+
+    if config.USE_MODEL_UNKNOWN_CHECK:
+        terms += _unknown_terms_from_model(text)
+
+    # Дедипликация с сохранением порядка
+    seen = set()
+    unique = []
+    for t in terms:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+
+    if not unique:
+        return ""
+
+    unique = unique[:config.MAX_SEARCH_TERMS]
+    context_map, newly = web_search.lookup_terms(unique, known=glossary, timeout=config.SEARCH_TIMEOUT)
+    if newly:
+        print(f"[Веб-поиск] Найдено в интернете: {', '.join(newly)}")
+    return web_search.format_context(context_map)
+
+
 def ask_ollama(text):
     context = format_memory_for_prompt()
     lore = format_characters_for_prompt()
     glossary = format_glossary_for_prompt()
+    web_context = _get_web_context(text)
     
     full_prompt = f"""{config.SYSTEM_PROMPT}
 
 {glossary}
+
+{web_context}
 
 {lore}
 

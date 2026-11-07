@@ -47,6 +47,7 @@ Thumbs.db
 data/memory.json
 data/characters.json
 data/glossary.json
+data/web_cache.json
 
 # Если решишь хранить API-ключи (например, от DeepSeek) в отдельном файле
 .env
