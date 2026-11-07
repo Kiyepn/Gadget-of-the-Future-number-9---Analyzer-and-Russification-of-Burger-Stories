@@ -51,4 +51,17 @@ data/web_cache.json
 
 # Если решишь хранить API-ключи (например, от DeepSeek) в отдельном файле
 .env
-config.json 
+config.json
+
+# Игнорируем тяжелые сборки
+build/
+dist/
+*.spec
+
+# Игнорируем кэш
+__pycache__/
+*.pyc
+
+# Игнорируем личные данные, но оставляем папку
+data/*
+!data/.gitkeep

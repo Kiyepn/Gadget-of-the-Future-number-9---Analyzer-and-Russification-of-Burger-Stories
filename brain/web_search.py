@@ -15,7 +15,9 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
-CACHE_FILE = os.path.join('data', 'web_cache.json')
+from brain.paths import data_dir, ensure_data_dir
+
+CACHE_FILE = os.path.join(data_dir(), 'web_cache.json')
 
 _HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -49,7 +51,14 @@ _COMMON_WORDS = {
     'hey', 'hmm', 'huh', 'yeah', 'nope', 'yes', 'please', 'thanks', 'thank',
     'sorry', 'sure', 'really', 'dont', 'cant', 'wont', 'im', 'ive', 'id',
     'ill', 'youre', 'youve', 'youd', 'well', 'scan', 'pay', 'code', 'payment',
-    'complete',
+    'complete', 'wait', 'minute', 'minutes', 'ago', 'course', 'everything',
+    'something', 'nothing', 'anything', 'anyone', 'someone', 'everyone',
+    'because', 'while', 'although', 'though', 'even', 'without', 'since',
+    'until', 'later', 'early', 'soon', 'today', 'tomorrow', 'yesterday',
+    'night', 'morning', 'evening', 'afternoon', 'tell', 'told', 'going',
+    'gonna', 'wanna', 'gotta', 'else', 'much', 'many', 'little', 'great',
+    'around', 'away', 'together', 'perhaps', 'maybe', 'probably', 'actually',
+    'sometimes', 'usually', 'often', 'finally', 'suddenly', 'true', 'false',
 }
 
 
@@ -57,9 +66,42 @@ def _normalize(word):
     return re.sub(r'[^a-z]', '', (word or '').lower())
 
 
+def is_valid_search_term(term):
+    """Пропускает к поиску только имена собственные и сложные термины/аббревиатуры.
+
+    Отсекает: одиночные слова короче 4 букв, стандартные английские слова
+    (артикли, предлоги, местоимения) и банальные фразы типа "Oh wait", "minutes ago".
+    """
+    t = (term or '').strip()
+    if not t:
+        return False
+
+    words = t.split()
+    norm_words = [_normalize(w) for w in words]
+
+    # 1. Фразы целиком из частых/служебных слов — не ищем.
+    if all(n in _COMMON_WORDS for n in norm_words):
+        return False
+
+    # 2. Одиночное слово: короче 4 букв — не ищем, и оно должно быть
+    #    именем собственным (с заглавной буквы) или аббревиатурой (ВСЕ КАПСОМ).
+    if len(words) == 1:
+        if len(words[0]) < 4:
+            return False
+        if not words[0][0].isupper():
+            return False
+        return True
+
+    # 3. Сложный термин ("N Corp", "Jia Xichun", "New York"):
+    #    каждое слово должно начинаться с заглавной буквы.
+    for w in words:
+        if not w[0].isupper():
+            return False
+    return True
+
+
 def _load_cache():
-    if not os.path.exists('data'):
-        os.makedirs('data')
+    ensure_data_dir()
     if not os.path.exists(CACHE_FILE):
         return {}
     try:
@@ -173,14 +215,7 @@ def extract_candidate_terms(text):
     final = []
     seen = set()
     for t in raw_terms:
-        norm_words = [_normalize(w) for w in t.split()]
-        # целиком из частых слов — не термин
-        if norm_words and all(n in _COMMON_WORDS for n in norm_words):
-            continue
-        if len(t) < 2:
-            continue
-        # короткое слово со строчными буквами (не аббревиатура) — шум
-        if ' ' not in t and not t.isupper() and len(t) < 3:
+        if not is_valid_search_term(t):
             continue
         key = t.lower()
         if key in seen:
@@ -202,6 +237,9 @@ def lookup_terms(terms, known=None, timeout=8, max_workers=3):
     to_search = []
     result = {}
     for term in terms:
+        # Жёсткий фильтр: не ищем мусор/обычные слова, даже если их вернула модель.
+        if not is_valid_search_term(term):
+            continue
         key = term.lower()
         if _normalize(term) in known:
             continue

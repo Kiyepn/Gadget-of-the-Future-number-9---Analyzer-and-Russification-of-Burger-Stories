@@ -2,15 +2,16 @@
 import json
 import os
 
-MEMORY_FILE = os.path.join('data', 'memory.json')
-CHARACTERS_FILE = os.path.join('data', 'characters.json')
+from brain.paths import data_dir, ensure_data_dir
+
+MEMORY_FILE = os.path.join(data_dir(), 'memory.json')
+CHARACTERS_FILE = os.path.join(data_dir(), 'characters.json')
 MAX_MEMORY = 15 # Количество запоминаемых реплик
 
 # --- РАБОТА С ПАМЯТЬЮ ДИАЛОГОВ ---
 
 def load_memory():
-    if not os.path.exists('data'):
-        os.makedirs('data')
+    ensure_data_dir()
         
     if not os.path.exists(MEMORY_FILE):
         with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
@@ -50,8 +51,7 @@ def format_memory_for_prompt():
 # --- РАБОТА С ПЕРСОНАЖАМИ (ЛОР) ---
 
 def load_characters():
-    if not os.path.exists('data'):
-        os.makedirs('data')
+    ensure_data_dir()
         
     if not os.path.exists(CHARACTERS_FILE):
         with open(CHARACTERS_FILE, 'w', encoding='utf-8') as f:

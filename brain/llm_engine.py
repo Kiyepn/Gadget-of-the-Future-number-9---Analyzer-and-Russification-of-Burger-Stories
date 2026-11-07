@@ -1,19 +1,25 @@
 # brain/llm_engine.py
 import time
 import requests
-import config
 import json
 import os
 import threading
 import re
+from brain.paths import data_dir, ensure_data_dir, load_config
 from brain.memory_engine import format_memory_for_prompt, save_memory, format_characters_for_prompt, save_character, load_characters
 from brain import web_search
 
-GLOSSARY_FILE = os.path.join('data', 'glossary.json')
+# config.py лежит РЯДОМ с приложением (не внутри .exe) и грузится динамически.
+config = load_config()
+
+GLOSSARY_FILE = os.path.join(data_dir(), 'glossary.json')
+
+# Жёсткие правила против галлюцинаций (выдуманные имена и обработка "Me:")
+ANTI_HALLUCINATION_RULES = """7. NO INVENTED NAMES: Never invent or insert any names (for example "Denis", "Denis:") that are NOT present in the original text. Translate only what is actually written; do not add speaker names that do not exist in the source.
+8. "Me:" HANDLING: If the text begins with "Me:" or "Me ", translate that part strictly as "Я:" — "Me" is the first-person narrator/inner voice, not a character name."""
 
 def load_glossary():
-    if not os.path.exists('data'):
-        os.makedirs('data')
+    ensure_data_dir()
     if not os.path.exists(GLOSSARY_FILE):
         with open(GLOSSARY_FILE, 'w', encoding='utf-8') as f:
             f.write("{}")
@@ -103,6 +109,8 @@ def ask_ollama(text):
     web_context = _get_web_context(text)
     
     full_prompt = f"""{config.SYSTEM_PROMPT}
+
+{ANTI_HALLUCINATION_RULES}
 
 {glossary}
 

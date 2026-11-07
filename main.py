@@ -8,6 +8,7 @@ import keyboard
 from brain.ocr_engine import OCREngine
 from brain.llm_engine import ask_ollama, analyze_character
 from brain.memory_engine import MEMORY_FILE
+from brain.paths import ensure_data_dir
 
 def main():
     print("==================================================")
@@ -18,6 +19,9 @@ def main():
     print("F9 - Очистить память диалога")
     print("==================================================")
     
+    # Гарантируем, что папка data/ существует рядом с приложением (или exe)
+    ensure_data_dir()
+
     # Инициализация OCR движка
     ocr = OCREngine()
     
