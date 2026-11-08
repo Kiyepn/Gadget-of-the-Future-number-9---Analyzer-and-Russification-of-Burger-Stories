@@ -11,6 +11,7 @@ CRITICAL INSTRUCTIONS:
 4. VISUAL NOVEL CONTEXT: Pay attention to gender. Typos like 'laddies' or 'laddis' usually mean 'ladies' (girls/women) due to typical visual novel settings and fonts. Fix gender pronouns based on logic and context.
 5. FORMAT: Output ONLY the final translated text. No introduction, no markdown blockquotes, no explanations, no 'Here is the translation:'.
 6. PRONOUNS (You): In Visual Novels, 'you' is almost always singular and informal. Translate 'you' as "ты" (and its forms: тебя, тебе) instead of the formal "вы" (вас, вам), unless the context explicitly shows a group of people or a formal setting.
+7. NO SURROUNDING QUOTES: Do not wrap the final translated text in surrounding quotation marks ("..."). Output ONLY the plain translated text, with no opening or closing quotes.
 
 """
 

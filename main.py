@@ -6,7 +6,7 @@ from PIL import ImageGrab
 import keyboard
 
 from brain.ocr_engine import OCREngine
-from brain.llm_engine import ask_ollama, analyze_character
+from brain.llm_engine import translate, analyze_character
 from brain.memory_engine import MEMORY_FILE
 from brain.paths import ensure_data_dir
 
@@ -68,7 +68,7 @@ def main():
                         print("[Нейросеть] Думает над переводом...")
                         
                         # 2. Переводим
-                        translated_text = ask_ollama(text)
+                        translated_text = translate(text)
                         print(f"[Гаджет Будущего]: {translated_text}")
                         
                         # 3. Фоновый анализ

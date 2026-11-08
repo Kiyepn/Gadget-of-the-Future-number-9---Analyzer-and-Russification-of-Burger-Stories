@@ -1,0 +1,9 @@
+# Зависимости проекта «Гаджет Будущего»
+customtkinter
+requests
+pillow
+easyocr
+numpy
+keyboard
+
+# Примечание: easyocr автоматически подтягивает torch и torchvision.

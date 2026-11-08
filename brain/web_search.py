@@ -187,6 +187,44 @@ def search_duckduckgo(query, timeout=8):
     return combined[:600]
 
 
+def _first_sentences(text, n=3):
+    """Берёт первые n предложений из очищенного текста."""
+    text = _clean(text)
+    if not text:
+        return ''
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    return ' '.join(parts[:n]).strip()
+
+
+def fetch_character_lore(name, timeout=10):
+    """Ищет описание персонажа визуальной новеллы в DuckDuckGo.
+
+    Пробует запросы «"Имя" visual novel wiki», «"Имя" fandom» и возвращает
+    первые 2-3 предложения сниппета. При отсутствии сети или ошибке возвращает
+    пустую строку (никогда не кидает исключение наружу).
+    """
+    name = (name or '').strip()
+    if not name:
+        return ''
+
+    queries = [
+        f'"{name}" visual novel wiki',
+        f'"{name}" fandom',
+        f'"{name}" visual novel character',
+    ]
+
+    for query in queries:
+        try:
+            snippet = search_duckduckgo(query, timeout=timeout)
+        except Exception:
+            snippet = ''
+        lore = _first_sentences(snippet, n=3)
+        if lore:
+            return lore
+
+    return ''
+
+
 def extract_candidate_terms(text):
     """Достаёт из текста потенциально неизвестные слова: имена, названия, аббревиатуры."""
     if not text:
