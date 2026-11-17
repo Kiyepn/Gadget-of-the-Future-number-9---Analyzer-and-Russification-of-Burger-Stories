@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -74,6 +75,71 @@ class OverlayTests(unittest.TestCase):
         self.assertTrue(info["noactivate"], "нет WS_EX_NOACTIVATE")
         self.assertTrue(info["topmost"], "окно не topmost")
         self.assertIn("x", info["geometry"])
+        # Регрессия: WS_EX_LAYERED на дочернем окне Tk делал карточку чёрной.
+        self.assertFalse(
+            info["ex_style"] & 0x00080000,
+            "WS_EX_LAYERED не должен стоять на дочернем окне Tk (DWM рисует его чёрным)",
+        )
+
+    def test_overlay_card_is_actually_visible_on_screen(self):
+        """Проверка экрана: карточка реально видна, а не чёрный прямоугольник.
+
+        Именно этот тест поймал бы баг v1.4.2: стили стояли правильно,
+        PrintWindow отдавал корректную картинку, а DWM показывал чёрный квадрат.
+        """
+        try:
+            from PIL import ImageGrab
+        except Exception:  # pragma: no cover
+            self.skipTest("Pillow недоступен")
+
+        import ctypes
+        import ctypes.wintypes as wt
+
+        user32 = ctypes.windll.user32
+
+        overlay = self._start(
+            overlay_position="center", overlay_duration=30,
+            overlay_width=520, overlay_font_size=20,
+        )
+        overlay.show_translation(
+            "Ryoshu: The payment is complete... we can proceed to the ninth district.",
+            "Рёсю: Оплата завершена... теперь мы можем пройти в девятый район города.",
+        )
+        time.sleep(1.0)
+        info = overlay.debug_hwnd_info()
+
+        rect = wt.RECT()
+        user32.GetWindowRect(wt.HWND(info["parent"]), ctypes.byref(rect))
+        try:
+            screen = ImageGrab.grab()
+        except Exception as exc:  # pragma: no cover
+            self.skipTest(f"нет доступа к экрану: {exc}")
+
+        # ImageGrab отдаёт физические пиксели, GetWindowRect — логические
+        # (процесс без DPI awareness), поэтому пересчитываем масштаб.
+        scale_x = screen.width / max(1, user32.GetSystemMetrics(0))
+        scale_y = screen.height / max(1, user32.GetSystemMetrics(1))
+        inset = 8 * scale_x
+        box = (
+            int(rect.left * scale_x + inset),
+            int(rect.top * scale_y + inset),
+            int(rect.right * scale_x - inset),
+            int(rect.bottom * scale_y - inset),
+        )
+        crop = screen.crop(box).convert("RGB")
+        pixels = list(crop.getdata())
+        total = max(1, len(pixels))
+        nonblack = sum(1 for r, g, b in pixels if r + g + b > 40)
+        bright = sum(1 for r, g, b in pixels if r > 150 and g > 150)
+
+        self.assertGreater(
+            nonblack / total, 0.5,
+            "область оверлея почти вся чёрная — карточка не отрисована на экране",
+        )
+        self.assertGreater(
+            bright / total, 0.002,
+            "в области оверлея не видно светлого текста — оверлей чёрный",
+        )
 
     def test_overlay_is_above_active_window_and_click_through(self):
         import ctypes
@@ -161,7 +227,10 @@ class OverlayTestModeTests(unittest.TestCase):
             "журнал должен создаваться в папке данных",
         )
         with open(os.path.join(tmp, "gadget.log"), "r", encoding="utf-8") as f:
-            self.assertIn("1.4.2", f.read())
+            log_text = f.read()
+        from brain.version import __version__
+
+        self.assertIn(__version__, log_text)
 
 
 if __name__ == "__main__":

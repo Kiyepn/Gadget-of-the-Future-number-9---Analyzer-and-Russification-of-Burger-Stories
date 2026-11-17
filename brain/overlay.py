@@ -67,6 +67,13 @@ _EX_STYLE_MASK = (
     _WS_EX_LAYERED | _WS_EX_TRANSPARENT | _WS_EX_TOOLWINDOW
     | _WS_EX_NOACTIVATE | _WS_EX_TOPMOST
 )
+
+# ВАЖНО (исправление v1.4.2+): WS_EX_LAYERED нельзя вешать на дочернее окно Tk.
+# DWM композитит layered-child без собственных layered-атрибутов сплошным
+# чёрным прямоугольником — именно из-за этого оверлей был «чёрным». Слой
+# (layering) задаёт только обёртка TkTopLevel; дочернему окну нужны лишь
+# click-through/toolwindow/noactivate.
+_CLIENT_EX_STYLE_MASK = _EX_STYLE_MASK & ~_WS_EX_LAYERED
 _HWND_TOPMOST = -1
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
@@ -385,12 +392,21 @@ class Overlay:
             user32.GetParent.restype = ctypes.c_void_p
             user32.GetParent.argtypes = [ctypes.c_void_p]
             parent = user32.GetParent(hwnd) or 0
-            for handle in (hwnd, parent):
-                if not handle:
-                    continue
-                current = _get_window_long(handle, _GWL_EXSTYLE)
-                _set_window_long(handle, _GWL_EXSTYLE, current | _EX_STYLE_MASK)
-                _set_window_pos_topmost(handle)
+
+            # Обёртка — настоящий layered-верхнеуровневый окно: полная маска.
+            if parent:
+                current = _get_window_long(parent, _GWL_EXSTYLE)
+                _set_window_long(parent, _GWL_EXSTYLE, current | _EX_STYLE_MASK)
+                _set_window_pos_topmost(parent)
+
+            # Дочернее окно: всё, кроме WS_EX_LAYERED (см. комментарий выше).
+            current = _get_window_long(hwnd, _GWL_EXSTYLE)
+            _set_window_long(
+                hwnd, _GWL_EXSTYLE,
+                (current | _CLIENT_EX_STYLE_MASK) & ~_WS_EX_LAYERED,
+            )
+            _set_window_pos_topmost(hwnd)
+
             self._hwnd = hwnd
             self._parent_hwnd = parent or 0
         except Exception as exc:

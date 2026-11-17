@@ -59,7 +59,7 @@ REM   data\memory.json, data\settings.json, data\characters.json,
 REM   data\glossary.json, data\web_cache.json, data\gadget.log
 
 echo [5/5] Упаковываю релиз в ZIP...
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\GadgetOfTheFuture\*' -DestinationPath 'dist\GadgetOfTheFuture-v1.4.2.zip' -CompressionLevel Optimal -Force"
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\GadgetOfTheFuture\*' -DestinationPath 'dist\GadgetOfTheFuture-v1.4.3.zip' -CompressionLevel Optimal -Force"
 if errorlevel 1 (
     echo [Ошибка] Не удалось упаковать ZIP.
     pause
@@ -72,21 +72,21 @@ echo  Готово! Исполняемый файл:
 echo    dist\GadgetOfTheFuture\GadgetOfTheFuture.exe
 echo.
 echo  Архив релиза:
-echo    dist\GadgetOfTheFuture-v1.4.2.zip
+echo    dist\GadgetOfTheFuture-v1.4.3.zip
 echo.
 echo  Рядом с exe уже лежат:
 echo    dist\GadgetOfTheFuture\config.py
 echo    dist\GadgetOfTheFuture\data\  (пустая, только .gitkeep)
 echo.
 echo  Размер архива:
-dir "dist\GadgetOfTheFuture-v1.4.2.zip"
+dir "dist\GadgetOfTheFuture-v1.4.3.zip"
 echo.
 echo  ВАЖНО: при первом запуске EasyOCR скачает свои модели
 echo  (обычно в %%USERPROFILE%%\.EasyOCR\model).
 echo.
 echo  Дальнейшие шаги:
 echo    1. Проверь, что переводчик запускается БЕЗ прав администратора.
-echo    2. Загрузи dist\GadgetOfTheFuture-v1.4.2.zip в релиз v1.4.2.
+echo    2. Загрузи dist\GadgetOfTheFuture-v1.4.3.zip в релиз v1.4.3.
 echo    3. Убедись, что в data\ нет личных файлов (memory/settings/ключ).
 echo ============================================================
 echo.
