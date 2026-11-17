@@ -1,19 +1,26 @@
 # brain/llm_engine.py
+import logging
 import time
 import requests
 import json
 import os
 import threading
 import re
-from brain.paths import data_dir, ensure_data_dir, load_config
+from brain.paths import data_file, ensure_data_dir, load_config
 from brain.memory_engine import format_memory_for_prompt, save_memory, format_characters_for_prompt, save_character, load_characters
 from brain import web_search
 from brain.settings import load_settings
 
+log = logging.getLogger(__name__)
+
 # config.py лежит РЯДОМ с приложением (не внутри .exe) и грузится динамически.
 config = load_config()
 
-GLOSSARY_FILE = os.path.join(data_dir(), 'glossary.json')
+
+def glossary_path():
+    """Путь к глоссарию (папку data выбирает brain.paths, возможно LocalAppData)."""
+    return data_file('glossary.json')
+
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
@@ -23,14 +30,16 @@ ANTI_HALLUCINATION_RULES = """8. NO INVENTED NAMES: Never invent or insert any n
 
 def load_glossary():
     ensure_data_dir()
-    if not os.path.exists(GLOSSARY_FILE):
-        with open(GLOSSARY_FILE, 'w', encoding='utf-8') as f:
+    path = glossary_path()
+    if not os.path.exists(path):
+        with open(path, 'w', encoding='utf-8') as f:
             f.write("{}")
         return {}
     try:
-        with open(GLOSSARY_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
         return {}
 
 def format_glossary_for_prompt():
@@ -101,7 +110,7 @@ def _get_web_context(text):
     unique = unique[:config.MAX_SEARCH_TERMS]
     context_map, newly = web_search.lookup_terms(unique, known=glossary, timeout=config.SEARCH_TIMEOUT)
     if newly:
-        print(f"[Веб-поиск] Найдено в интернете: {', '.join(newly)}")
+        log.info(f"[Веб-поиск] Найдено в интернете: {', '.join(newly)}")
     return web_search.format_context(context_map)
 
 
@@ -146,7 +155,7 @@ Text to process:
             return result
             
         except Exception as e:
-            print(f"[Ошибка Ollama] Попытка {attempt + 1} не удалась: {e}")
+            log.warning(f"[Ошибка Ollama] Попытка {attempt + 1} не удалась: {e}")
             time.sleep(2)
     return "[Ошибка: Ollama не отвечает]"
 
@@ -200,7 +209,7 @@ def ask_deepseek(text, api_key=None, model=None):
             if response.status_code != 200:
                 err = data.get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else str(err)
-                print(f"[Ошибка DeepSeek] HTTP {response.status_code}: {msg}")
+                log.error(f"[Ошибка DeepSeek] HTTP {response.status_code}: {msg}")
                 return f"[Ошибка DeepSeek: {msg}]"
 
             result = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
@@ -211,7 +220,7 @@ def ask_deepseek(text, api_key=None, model=None):
             return result
 
         except Exception as e:
-            print(f"[Ошибка DeepSeek] Попытка {attempt + 1} не удалась: {e}")
+            log.warning(f"[Ошибка DeepSeek] Попытка {attempt + 1} не удалась: {e}")
             time.sleep(2)
     return "[Ошибка: DeepSeek не отвечает]"
 
@@ -236,16 +245,16 @@ def background_analyze(name, text):
     try:
         lore = web_search.fetch_character_lore(name, timeout=config.SEARCH_TIMEOUT)
     except Exception as e:
-        print(f"\n[Лор] Ошибка веб-поиска: {e}")
+        log.warning(f"[Лор] Ошибка веб-поиска: {e}")
         lore = ""
 
     if lore:
         save_character(name, lore)
-        print(f"\n[Лор] Записан: {name} — {lore}")
+        log.info(f"[Лор] Записан: {name} — {lore}")
         return
 
     # Фоллбэк: локальная модель, строго 1 предложение.
-    print(f"\n[Лор] DuckDuckGo не нашёл {name}. Фоллбэк на локальную модель...")
+    log.info(f"[Лор] DuckDuckGo не нашёл {name}. Фоллбэк на локальную модель...")
     prompt = f"""
 Analyze the following text from a visual novel. The character speaking is "{name}".
 Write EXACTLY ONE short sentence (in Russian) describing their personality, tone, or role.
@@ -270,9 +279,9 @@ Text: "{text}"
                 data = json.loads(result)
                 for char_name, desc in data.items():
                     save_character(char_name, desc)
-                    print(f"\n[Лор] В фоне записан: {char_name} — {desc}")
+                    log.info(f"[Лор] В фоне записан: {char_name} — {desc}")
     except Exception as e:
-        print(f"\n[Лор] Ошибка фонового анализа: {e}")
+        log.warning(f"[Лор] Ошибка фонового анализа: {e}")
 
 def analyze_character(text):
     """Ищет имена только с двоеточием или четко определяет внутренний голос"""
@@ -298,6 +307,6 @@ def analyze_character(text):
             if len(name) > 20 or name.lower() in ["surprisingly", "suddenly", "however"]:
                 return
                 
-            print(f"\n[Лор] Обнаружен новый персонаж: {name}. Ищу описание...")
-            thread = threading.Thread(target=background_analyze, args=(name, text))
+            log.info(f"[Лор] Обнаружен новый персонаж: {name}. Ищу описание...")
+            thread = threading.Thread(target=background_analyze, args=(name, text), daemon=True)
             thread.start()

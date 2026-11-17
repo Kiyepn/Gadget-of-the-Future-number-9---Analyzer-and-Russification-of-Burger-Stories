@@ -4,6 +4,6 @@ requests
 pillow
 easyocr
 numpy
-keyboard
+pynput
 
 # Примечание: easyocr автоматически подтягивает torch и torchvision.

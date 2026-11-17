@@ -15,9 +15,12 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
-from brain.paths import data_dir, ensure_data_dir
+from brain.paths import data_file, ensure_data_dir
 
-CACHE_FILE = os.path.join(data_dir(), 'web_cache.json')
+
+def cache_path():
+    """Путь к кэшу поиска (вычисляется лениво: папку data выбирает brain.paths)."""
+    return data_file('web_cache.json')
 
 _HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -102,10 +105,11 @@ def is_valid_search_term(term):
 
 def _load_cache():
     ensure_data_dir()
-    if not os.path.exists(CACHE_FILE):
+    path = cache_path()
+    if not os.path.exists(path):
         return {}
     try:
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except Exception:
@@ -113,11 +117,19 @@ def _load_cache():
 
 
 def _save_cache(cache):
+    """Атомарная запись кэша: не оставляет обрезанный JSON при сбое."""
+    path = cache_path()
+    tmp = f"{path}.tmp"
     try:
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
     except Exception:
-        pass
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 def _clean(text):
