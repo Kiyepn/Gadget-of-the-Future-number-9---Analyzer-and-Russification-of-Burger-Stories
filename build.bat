@@ -24,9 +24,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/5] Очищаю старые артефакты сборки (build/, dist/, *.spec)...
+echo [2/5] Закрываю запущенные копии и очищаю старые артефакты (build/, dist/, *.spec)...
+REM Если приложение сейчас запущено, Windows держит файлы dist\ и сборка
+REM получится битой. Поэтому сначала закрываем все копии.
+taskkill /IM GadgetOfTheFuture.exe /F >nul 2>&1
+timeout /t 2 /nobreak >nul
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
+if exist dist (
+    echo.
+    echo [Ошибка] Папку dist не удалось удалить: она занята запущенным процессом.
+    echo Закрой GadgetOfTheFuture.exe (и лаунчер) и запусти сборку заново.
+    pause
+    exit /b 1
+)
 if exist "*.spec" del /q "*.spec"
 
 echo [3/5] Запускаю PyInstaller (onedir + windowed, БЕЗ прав администратора)...
