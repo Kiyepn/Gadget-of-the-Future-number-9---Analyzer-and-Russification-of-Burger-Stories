@@ -9,8 +9,8 @@
   python main.py --no-overlay       — консольный режим без оверлея (для отладки).
 
 Модуль импортируется лаунчером gui_launcher.py: ``import main`` сам по себе
-ничего не запускает — цикл переводчика стартует только при наличии флага
---run-translator.
+ничего не запускает. Лаунчер (в том числе собранный .exe) вызывает
+``main.main(argv)``, передавая ему свои флаги командной строки.
 """
 
 import argparse
@@ -526,5 +526,5 @@ def main(argv=None):
     return _run_translator(args)
 
 
-if __name__ == "__main__" or "--run-translator" in sys.argv:
+if __name__ == "__main__":
     sys.exit(main())

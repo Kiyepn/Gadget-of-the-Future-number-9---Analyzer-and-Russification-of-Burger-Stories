@@ -23,12 +23,14 @@ import threading
 # Гарантируем, что корень проекта в sys.path (нужно для импорта пакета brain).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# В собранном .exe лаунчер запускает сам себя с флагом --run-translator,
-# чтобы выполнить переводчик (main.py) вместо GUI.
-# ВАЖНО: main.py при импорте сам проверяет этот флаг и запускает цикл.
-if "--run-translator" in sys.argv:
-    import main  # noqa: F401  (побочный эффект: запуск переводчика)
-    sys.exit(0)
+# Собранный .exe — это лаунчер. Чтобы флаги переводчика работали и в нём,
+# передаём их main.py: --run-translator (запуск переводчика), --overlay-test
+# (проверка оверлея) и --no-overlay.
+_DELEGATED_FLAGS = ("--run-translator", "--overlay-test", "--no-overlay")
+if any(flag in sys.argv for flag in _DELEGATED_FLAGS):
+    import main  # noqa: E402
+
+    sys.exit(main.main(sys.argv[1:]))
 
 try:
     import customtkinter as ctk

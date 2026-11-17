@@ -45,8 +45,6 @@
 
 Хоткеи регистрируются через Win32 `RegisterHotKey`, при конфликте — через `pynput`.
 
-<img src="https://media1.tenor.com/m/aw8ecOe1s-EAAAAC/untan-yui-hirasawa.gif" width="250" alt="Yui Untan">
-
 
 
 ### Требования:
