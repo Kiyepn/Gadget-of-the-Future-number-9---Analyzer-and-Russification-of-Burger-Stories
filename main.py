@@ -53,6 +53,21 @@ def _is_windows():
     return os.name == "nt"
 
 
+def _guard_std_streams():
+    """В windowed-.exe sys.stdout и sys.stderr равны None.
+
+    Сторонние библиотеки (EasyOCR, torch, tqdm) пишут в stdout/stderr напрямую
+    и при None падают с AttributeError. Подменяем их на os.devnull: логи всё
+    равно идут в data/gadget.log.
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            try:
+                setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+            except OSError:
+                pass
+
+
 def _enable_dpi_awareness():
     """Делает окно оверлея DPI-осведомлённым.
 
@@ -396,6 +411,7 @@ def _capture_loop(ocr, translate, analyze_character, clear_memory):
 # ============ режимы запуска ============
 
 def _run_overlay_test(seconds):
+    _guard_std_streams()
     _enable_dpi_awareness()
     setup_logging(logging.INFO)
     log.info("Тест оверлея v%s", __version__)
@@ -419,6 +435,7 @@ def _run_overlay_test(seconds):
 def _run_translator(args):
     global _overlay, _mutex_handle
 
+    _guard_std_streams()
     _enable_dpi_awareness()
     _stop_event.clear()
     _pause_toggle.clear()
