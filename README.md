@@ -10,14 +10,7 @@
 3. Локальная `Ollama` (или облачный `DeepSeek`) выдает сочный литературный перевод
    прямо в оверлей поверх игры.
 
-<img src="https://media1.tenor.com/m/aw8ecOe1s-EAAAAC/untan-yui-hirasawa.gif" width="250" alt="Yui Untan">
-
-### Главное в v1.4.3: видимый оверлей вместо консоли
-В v1.4.0–v1.4.1 перевод печатался в консоль, а окна-оверлея не было вовсе. Если его
-добавить «на админских правах», получается классическая проблема Windows: **UIPI**
-(User Interface Privilege Isolation) запрещает процессу с высоким уровнем целостности
-рисовать поверх окон обычных приложений. Оверлей создавался, перевод считался, но
-окно было невидимым.
+<img src="https://media1.tenor.com/m/aw8ecOe1s-EAAAAC/untan-yui-hirasawa.gif" width="500" alt="Yui Untan">
 
 
 
