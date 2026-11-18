@@ -3,7 +3,7 @@
 Утилита на базе ИИ для мгновенного перевода визуальных новелл с английского на русский язык.
 Создано безумным первокурсником логистики в 9 утра.
 
-![Кармен Distort](https://tenor.com)
+![Кармен Distort]([https://tenor.com](https://media1.tenor.com/m/Dm8nHN64xC0AAAAC/carmen-limbus-company.gif))
 
 
 ### Как это работает:
