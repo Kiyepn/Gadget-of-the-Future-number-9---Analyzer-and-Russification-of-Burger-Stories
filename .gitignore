@@ -72,3 +72,6 @@ data/*
 # Версионные папки сборки (например dist_v143/build_v143)
 dist_v*/
 build_v*/
+# Тестовое окружение для проверки requirements.txt
+.venv-reqtest/
+.venv*/

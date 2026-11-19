@@ -146,8 +146,12 @@ build.bat
 ```
 `build.bat` — тонкая ASCII-обёртка (cmd.exe ломает разбор больших bat-файлов с
 `chcp`, поэтому вся логика в `build.ps1`). Результат: `dist\GadgetOfTheFuture\GadgetOfTheFuture.exe`
-и готовый архив `dist\GadgetOfTheFuture-v1.5.0-beta.zip` (~22 МБ). Сборка **не**
-запрашивает права администратора — это обязательное условие работы оверлея.
+и готовый архив `dist\GadgetOfTheFuture-v1.5.0-beta.zip` (~22 МБ) плюс
+`*.zip.sha256` для сверки. Внутри архива одна папка `GadgetOfTheFuture` с exe,
+`README.txt` (инструкция для пользователя), `config.py` и пустой `data\`.
+Сгенерированный PyInstaller'ом `.spec` теперь пишется в `build\`, а не в корень.
+Сборка **не** запрашивает права администратора — это обязательное условие работы
+оверлея.
 
 Скрипт исключает `easyocr`, `torch`, `torchvision`, `numpy` и прочие тяжёлые
 пакеты (`--exclude-module`): без этого PyInstaller всё равно подтянул бы их через

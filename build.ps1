@@ -131,10 +131,16 @@ foreach ($path in @((Join-Path $Root "build"), $DistDir)) {
     }
 }
 
-# Спека PyInstaller генерируется заново; чужие .spec в корне не трогаем.
+# Спека PyInstaller теперь пишется в build\, а не в корень. Старый мусорной
+# GadgetOfTheFuture.spec из корня (оставшийся от прошлых сборок) удаляем, чтобы
+# никто не пытался собирать по устаревшему файлу.
 $specPath = Join-Path $Root "$AppName.spec"
 if (Test-Path -LiteralPath $specPath) {
     Remove-Item -LiteralPath $specPath -Force -ErrorAction SilentlyContinue
+}
+$buildDir = Join-Path $Root "build"
+if (-not (Test-Path -LiteralPath $buildDir)) {
+    New-Item -ItemType Directory -Path $buildDir | Out-Null
 }
 if (Test-Path -LiteralPath $ZipPath) {
     Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
@@ -150,6 +156,11 @@ $pyInstallerArgs = @(
     "--onedir"
     "--windowed"
     "--name", $AppName
+
+    # .spec-файл генерируется заново при каждой сборке. Держим его в build\,
+    # чтобы он не появлялся в корне проекта и не путал (в git его нет — *.spec
+    # в .gitignore, источник истины — этот скрипт).
+    "--specpath", (Join-Path $Root "build")
 
     # Только то, что реально нужно приложению.
     "--collect-all", "customtkinter"
@@ -203,8 +214,14 @@ foreach ($heavy in @("torch", "easyocr", "torchvision")) {
 Write-Ok "winrt на месте, torch/easyocr отсутствуют."
 
 # --- Файлы рядом с exe -------------------------------------------------------
-Write-Step "Копирую config.py и создаю пустую папку data\ рядом с .exe..."
+Write-Step "Копирую config.py, README для пользователя и создаю пустую папку data\..."
 Copy-Item -LiteralPath (Join-Path $Root "config.py") -Destination (Join-Path $DistDir "config.py") -Force -ErrorAction Stop
+$userReadme = Join-Path $Root "packaging\README-USER.txt"
+if (Test-Path -LiteralPath $userReadme -PathType Leaf) {
+    Copy-Item -LiteralPath $userReadme -Destination (Join-Path $DistDir "README.txt") -Force -ErrorAction Stop
+} else {
+    Write-Warning "Нет packaging\README-USER.txt — архив уйдёт без инструкции."
+}
 $dataDir = Join-Path $DistDir "data"
 if (-not (Test-Path -LiteralPath $dataDir)) {
     New-Item -ItemType Directory -Path $dataDir | Out-Null
@@ -214,16 +231,30 @@ Set-Content -LiteralPath (Join-Path $dataDir ".gitkeep") -Value "" -NoNewline
 # Персональные данные разработчика НЕ копируем (в них API-ключ и личное):
 #   data\memory.json, data\settings.json, data\characters.json,
 #   data\glossary.json, data\web_cache.json, data\gadget.log
-Write-Ok "config.py на месте, data\ пустая."
+Write-Ok "config.py и README.txt на месте, data\ пустая."
 
 # --- [5/5] ZIP ---------------------------------------------------------------
+# Архивируем саму папку, а не её содержимое: при распаковке у пользователя
+# появляется одна папка GadgetOfTheFuture, а не 1000+ файлов в текущем каталоге.
 Write-Step "[5/5] Упаковываю релиз в ZIP..."
 try {
-    Compress-Archive -Path (Join-Path $DistDir "*") -DestinationPath $ZipPath -CompressionLevel Optimal -Force -ErrorAction Stop
+    Compress-Archive -Path $DistDir -DestinationPath $ZipPath -CompressionLevel Optimal -Force -ErrorAction Stop
 } catch {
     Stop-WithError "Не удалось упаковать ZIP: $($_.Exception.Message)"
 }
 Write-Ok "ZIP готов."
+
+# --- Контрольная сумма -------------------------------------------------------
+# Файл .sha256 рядом с архивом: пользователь может сверить хэш перед запуском
+# (полезно, пока exe не подписан сертификатом).
+$shaPath = "$ZipPath.sha256"
+try {
+    $hash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLower()
+    Set-Content -LiteralPath $shaPath -Value ("{0}  {1}" -f $hash, (Split-Path -Leaf $ZipPath)) -Encoding ascii
+} catch {
+    $hash = $null
+    Write-Warning "Не удалось посчитать SHA256: $($_.Exception.Message)"
+}
 
 # --- Итоги -------------------------------------------------------------------
 $folderBytes = (Get-ChildItem -LiteralPath $DistDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
@@ -235,6 +266,11 @@ Write-Host "============================================================" -Foreg
 Write-Host " Готово!" -ForegroundColor Green
 Write-Host "   exe:  dist\$AppName\$AppName.exe"
 Write-Host "   ZIP:  dist\$AppName-$Version.zip"
+Write-Host ""
+if ($hash) {
+    Write-Host "   SHA256: $hash" -ForegroundColor DarkGray
+    Write-Host "   (он же в файле $AppName-$Version.zip.sha256)" -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "   Размер папки: $folderMb МБ"
 Write-Host "   Размер ZIP:   $zipMb МБ"
