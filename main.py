@@ -25,6 +25,13 @@ import time
 from PIL import Image, ImageGrab
 
 from brain.logging_setup import setup_logging
+from brain.ocr_providers import (
+    DEFAULT_PROVIDER,
+    PROVIDER_EASYOCR,
+    PROVIDER_LABELS,
+    PROVIDER_WINDOWS,
+    PROVIDERS,
+)
 from brain.overlay import Overlay
 from brain.paths import data_location_hint, ensure_data_dir
 from brain.version import APP_TITLE, __version__
@@ -94,6 +101,98 @@ def _parse_log_level(name):
         return getattr(logging, str(name).upper())
     except (AttributeError, TypeError):
         return logging.INFO
+
+
+# ============ выбор OCR-провайдера ============
+
+def _create_ocr(settings):
+    """Создаёт OCR-движок по настройке ``"ocr_provider"``.
+
+    Импорты провайдеров ленивые: сборка v1.5.0 (Lightweight) не содержит
+    easyocr/torch, поэтому brain.ocr_engine подгружается только по запросу.
+    По умолчанию используется системный движок Windows (Windows Native).
+    """
+    provider = str(settings.get("ocr_provider") or DEFAULT_PROVIDER).strip().lower()
+    if provider not in PROVIDERS:
+        log.warning(
+            "Неизвестный провайдер OCR %r — использую %s.", provider, DEFAULT_PROVIDER
+        )
+        provider = DEFAULT_PROVIDER
+
+    if provider == PROVIDER_WINDOWS and not _is_windows():
+        log.warning(
+            "Windows Native OCR работает только в Windows — переключаюсь на EasyOCR."
+        )
+        return _finish_easyocr(settings)
+
+    if provider == PROVIDER_WINDOWS:
+        try:
+            ocr = _create_windows_ocr()
+        except Exception as exc:
+            log.warning("Windows Native OCR недоступен: %s", exc)
+            log.info("Пробую запасной движок EasyOCR...")
+            try:
+                return _finish_easyocr(settings)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "Windows Native OCR недоступен (%s), а EasyOCR в этой сборке нет "
+                    "(%s). Установите языковой пакет OCR: Параметры -> Время и язык -> "
+                    "Язык -> Добавить язык (нужен английский), либо поставьте easyocr "
+                    '(pip install easyocr) и задайте "ocr_provider": "easyocr".'
+                    % (exc, fallback_exc)
+                ) from exc
+
+        log.info("Используется OCR: %s", PROVIDER_LABELS[PROVIDER_WINDOWS])
+        log.info(
+            "Windows OCR: язык %s, бэкенд %s",
+            getattr(ocr, "language_tag", None) or "профиля Windows",
+            getattr(ocr, "backend_name", None) or "?",
+        )
+        return ocr
+
+    return _finish_easyocr(settings)
+
+
+def _finish_easyocr(settings):
+    """Создаёт EasyOCR и пишет в журнал, какой движок используется."""
+    ocr = _create_easyocr(settings)
+    log.info("Используется OCR: %s", PROVIDER_LABELS[PROVIDER_EASYOCR])
+    return ocr
+
+
+def _create_windows_ocr():
+    """Windows Native OCR (Windows.Media.Ocr) — лёгкий, без torch."""
+    try:
+        from brain.ocr_providers.win_ocr import WinOCR
+    except ImportError as exc:
+        raise RuntimeError(
+            "модуль Windows Native OCR не загрузился — похоже, не установлены "
+            "пакеты winrt. Установите: pip install winrt-runtime "
+            "winrt-Windows.Media.Ocr winrt-Windows.Graphics.Imaging "
+            "winrt-Windows.Storage.Streams winrt-Windows.Globalization"
+        ) from exc
+
+    ocr = WinOCR()
+    backend = ocr.warmup()
+    log.info("Windows Native OCR прогрелся (бэкенд %s).", backend)
+    return ocr
+
+
+def _create_easyocr(settings):
+    """Старый движок EasyOCR; в Lightweight-сборке его нет по определению."""
+    try:
+        from brain.ocr_engine import OCREngine
+    except ImportError as exc:
+        raise RuntimeError(
+            "модуль easyocr не импортируется (в сборке Lightweight нет easyocr и "
+            "torch). Установите его командой pip install easyocr или переключитесь на "
+            'Windows OCR: в data/settings.json задайте "ocr_provider": "windows"'
+        ) from exc
+    try:
+        return OCREngine(settings.get("ocr_gpu", "auto"))
+    except (ImportError, OSError) as exc:
+        # OSError — это обычно не найденная DLL torch (msvcp140.dll и т.п.).
+        raise RuntimeError("easyocr установлен, но не загружается: %s" % exc) from exc
 
 
 def _acquire_single_instance():
@@ -454,7 +553,6 @@ def _run_translator(args):
 
     hotkeys = None
     try:
-        from brain.ocr_engine import OCREngine
         from brain.settings import load_settings
 
         settings = load_settings()
@@ -474,7 +572,7 @@ def _run_translator(args):
             _overlay.show_status("Загрузка OCR...", "info", duration=0)
 
         started = time.time()
-        ocr = OCREngine(settings.get("ocr_gpu", "auto"))
+        ocr = _create_ocr(settings)
         log.info("OCR готов за %.2f с", time.time() - started)
 
         if _overlay is not None:
@@ -498,8 +596,15 @@ def _run_translator(args):
         log.info("Остановка по Ctrl+C.")
     except SystemExit:
         raise
-    except Exception:
+    except Exception as exc:
         log.exception("Не удалось запустить переводчик")
+        # Без этого пользователь видит только мигание оверлея и тихий выход.
+        if _overlay is not None:
+            try:
+                _overlay.show_status("Ошибка запуска: " + str(exc)[:140], "error", duration=0)
+                time.sleep(4.0)
+            except Exception:
+                pass
         return 1
     finally:
         if hotkeys is not None:

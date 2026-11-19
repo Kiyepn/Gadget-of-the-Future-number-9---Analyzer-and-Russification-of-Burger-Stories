@@ -5,11 +5,26 @@
 
 ### Как это работает:
 1. Жмешь `Win + Shift + S` и выделяешь область с текстом.
-2. Локальная нейросеть `EasyOCR` вытаскивает буквы силами твоей видеокарты.
+2. Штатный движок Windows (`Windows.Media.Ocr`) вытаскивает буквы — без torch
+   и без скачивания моделей, за десятки миллисекунд.
 3. Локальная `Ollama` (или облачный `DeepSeek`) выдает сочный литературный перевод
    прямо в оверлей поверх игры.
 
 <img src="https://media1.tenor.com/m/aw8ecOe1s-EAAAAC/untan-yui-hirasawa.gif" width="250" alt="Yui Untan">
+
+### Главное в v1.5.0-beta: Windows Native OCR вместо EasyOCR (Lightweight)
+OCR переехал с `EasyOCR` на системный движок Windows (`Windows.Media.Ocr`):
+- **Сборка похудела примерно в 20 раз**: папка с exe — ~45 МБ вместо ~938 МБ,
+  архив релиза — ~22 МБ вместо сотен мегабайт (torch + torchvision больше не
+  тянутся).
+- **Распознавание быстрее**: ~10–40 мс на кадр вместо секунд на CPU; ничего не
+  скачивается при первом запуске (`~/.EasyOCR/model` больше не нужен).
+- Код `brain/ocr_engine.py` (EasyOCR) **не удалён**: старый движок включается
+  настройкой `"ocr_provider": "easyocr"` в `data/settings.json`, но для этого его
+  нужно поставить отдельно (`pip install easyocr`) — в lightweight-сборку он не
+  входит.
+- Нужен языковой пакет OCR Windows для английского (`en-US`): Параметры → Время и
+  язык → Язык → Добавить язык. Если пакета нет, в журнале будет понятная ошибка.
 
 ### Главное в v1.4.3: видимый оверлей вместо консоли
 В v1.4.0–v1.4.1 перевод печатался в консоль, а окна-оверлея не было вовсе. Если его
@@ -53,10 +68,14 @@
 
 
 ### Требования:
+- Windows 10 или 11 (для Windows Native OCR) + языковой пакет OCR (`en-US`)
 - Python 3.14
 - Ollama (для локального перевода; по моделям смотреть в релизе)
-- Pillow, easyocr, requests, pynput, numpy, customtkinter
+- Pillow, requests, pynput, numpy, customtkinter, winrt (см. `requirements.txt`)
 - Установка зависимостей: `pip install -r requirements.txt`
+
+> EasyOCR/torch в `requirements.txt` **не входят** с v1.5.0-beta. Если нужен
+> старый движок — раскомментируйте три строки в конце файла.
 
 ### Запуск
 ```
@@ -125,9 +144,14 @@ DuckDuckGo и добавляет найденный контекст в пром
 ```
 build.bat
 ```
-Результат: `dist\GadgetOfTheFuture\GadgetOfTheFuture.exe` и готовый архив
-`dist\GadgetOfTheFuture-v1.4.3.zip`. Сборка **не** запрашивает права администратора —
-это обязательное условие работы оверлея.
+`build.bat` — тонкая ASCII-обёртка (cmd.exe ломает разбор больших bat-файлов с
+`chcp`, поэтому вся логика в `build.ps1`). Результат: `dist\GadgetOfTheFuture\GadgetOfTheFuture.exe`
+и готовый архив `dist\GadgetOfTheFuture-v1.5.0-beta.zip` (~22 МБ). Сборка **не**
+запрашивает права администратора — это обязательное условие работы оверлея.
+
+Скрипт исключает `easyocr`, `torch`, `torchvision`, `numpy` и прочие тяжёлые
+пакеты (`--exclude-module`): без этого PyInstaller всё равно подтянул бы их через
+оставшийся в исходниках `brain/ocr_engine.py`, и сборка снова выросла бы до ~1 ГБ.
 
 ### Тесты
 ```

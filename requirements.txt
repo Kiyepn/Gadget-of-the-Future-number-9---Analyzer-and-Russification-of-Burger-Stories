@@ -1,9 +1,30 @@
-# Зависимости проекта «Гаджет Будущего»
+# Зависимости проекта «Гаджет Будущего» — v1.5.0-beta (Lightweight)
+#
+# Отличие от v1.4.3: OCR переведён с EasyOCR на системный движок Windows
+# (Windows.Media.Ocr). Из-за этого из зависимостей ушли easyocr, torch и
+# torchvision — сборка стала в разы меньше и стартовала без загрузки моделей.
+
 customtkinter
 requests
 pillow
-easyocr
 numpy
 pynput
+pystray
 
-# Примечание: easyocr автоматически подтягивает torch и torchvision.
+# --- OCR: Windows Native (Windows.Media.Ocr) ---
+# winrt-runtime — нативная часть проекции WinRT, остальные пакеты —
+# сгенерированные обёртки отдельных пространств имён.
+winrt-runtime
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections
+winrt-Windows.Storage.Streams
+winrt-Windows.Graphics.Imaging
+winrt-Windows.Globalization
+winrt-Windows.Media.Ocr
+
+# --- EasyOCR: код остался в исходниках, но в сборку не входит ---
+# Чтобы вернуть старый движок: раскомментируйте три строки ниже, поставьте
+# в data/settings.json "ocr_provider": "easyocr" и учтите ~2 ГБ зависимостей.
+# easyocr
+# torch
+# torchvision

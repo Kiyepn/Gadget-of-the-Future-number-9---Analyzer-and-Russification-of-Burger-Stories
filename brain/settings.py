@@ -13,6 +13,7 @@ import logging
 import os
 
 from brain import secrets_dpapi
+from brain.ocr_providers import DEFAULT_PROVIDER, PROVIDERS
 from brain.paths import data_file, ensure_data_dir
 
 _ENC_PREFIX = "dpapi:"
@@ -23,7 +24,8 @@ DEFAULT_SETTINGS = {
     "ollama_model": "translategemma:4b",
     "deepseek_model": "deepseek-chat",
     "api_key": "",                            # в файле лежит в виде "dpapi:<base64>"
-    "ocr_gpu": "auto",                        # "auto" | "gpu" | "cpu"
+    "ocr_provider": DEFAULT_PROVIDER,         # "windows" (по умолчанию) | "easyocr"
+    "ocr_gpu": "auto",                        # "auto" | "gpu" | "cpu" (только easyocr)
 
     # --- оверлей перевода ---
     "overlay_enabled": True,
@@ -65,6 +67,12 @@ def _sanitize(settings):
 
     if data.get("provider") not in ("ollama", "deepseek"):
         data["provider"] = "ollama"
+    ocr_provider = data.get("ocr_provider")
+    if isinstance(ocr_provider, str):
+        ocr_provider = ocr_provider.strip().lower()
+    if ocr_provider not in PROVIDERS:
+        ocr_provider = DEFAULT_PROVIDER
+    data["ocr_provider"] = ocr_provider
     if data.get("ocr_gpu") not in ("auto", "gpu", "cpu"):
         data["ocr_gpu"] = "auto"
     if data.get("overlay_position") not in OVERLAY_POSITIONS:
@@ -158,6 +166,8 @@ def load_settings():
         settings["ollama_model"] = env["GADGET_OLLAMA_MODEL"]
     if env.get("GADGET_DEEPSEEK_MODEL"):
         settings["deepseek_model"] = env["GADGET_DEEPSEEK_MODEL"]
+    if env.get("GADGET_OCR_PROVIDER"):
+        settings["ocr_provider"] = env["GADGET_OCR_PROVIDER"]
 
     return _sanitize(settings)
 
