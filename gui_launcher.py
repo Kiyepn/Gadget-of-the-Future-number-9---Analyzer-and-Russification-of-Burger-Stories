@@ -518,7 +518,6 @@ class TranslatorLauncher(ctk.CTk):
         self._build_provider_card()
         self._build_download_card()
         self._build_overlay_card()
-        self._build_appearance_card()
         self._build_data_card()
         self._build_log_card()
         self._build_footer()
@@ -688,63 +687,11 @@ class TranslatorLauncher(ctk.CTk):
         )
         self.hint.pack(fill="x", padx=20, pady=(0, 14))
 
-    # --------------------------------------------------- карточка оформления
-    def _build_appearance_card(self):
-        card = self._card("Оформление лаунчера")
-
-        grid = ctk.CTkFrame(card, fg_color="transparent")
-        grid.pack(fill="x", padx=20)
-        grid.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            grid, text="Тема", font=ctk.CTkFont(size=12), text_color=MUTED,
-        ).grid(row=0, column=0, sticky="w", pady=4)
-
-        self.theme_menu = ctk.CTkOptionMenu(
-            grid, values=list(THEME_LABELS.keys()),
-            command=self._on_theme_changed,
-            fg_color=BG, button_color="#2a2a3a", button_hover_color="#3a3a4c",
-            dropdown_fg_color=CARD, dropdown_hover_color="#2a2a3a",
-            text_color=TEXT, font=ctk.CTkFont(size=13),
-        )
-        self.theme_menu.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=4)
-
-        self.create_shortcut_var = ctk.BooleanVar(
-            value=bool(self.settings.get("create_shortcut", True))
-        )
-        ctk.CTkCheckBox(
-            card, text="Создавать ярлык на рабочем столе при запуске",
-            variable=self.create_shortcut_var, command=self._schedule_persist,
-            font=ctk.CTkFont(size=12), text_color=MUTED,
-            checkbox_width=16, checkbox_height=16,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
-        ).pack(anchor="w", padx=20, pady=(8, 4))
-
-        shortcut_row = ctk.CTkFrame(card, fg_color="transparent")
-        shortcut_row.pack(fill="x", padx=20, pady=(0, 12))
-        ctk.CTkButton(
-            shortcut_row, text="Создать ярлык сейчас", command=self._create_shortcut_now,
-            height=30, corner_radius=8, width=180,
-            fg_color="#2a2a3a", hover_color="#3a3a4c",
-            font=ctk.CTkFont(size=12), text_color=TEXT,
-        ).pack(side="left")
-        self.shortcut_hint = ctk.CTkLabel(
-            shortcut_row, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
-        )
-        self.shortcut_hint.pack(side="left", padx=(10, 0))
-
-        self.theme_hint = ctk.CTkLabel(
-            card, text=(
-                "Тема меняет и лаунчер, и карточку перевода (карточка перекрасится "
-                "после перезапуска переводчика). Обои — в следующем обновлении."
-            ),
-            font=ctk.CTkFont(size=11), text_color=MUTED, wraplength=520, justify="left",
-        )
-        self.theme_hint.pack(fill="x", padx=20, pady=(0, 14))
-
-    # ------------------------------------------------------- карточка оверлея
+    # ------------------------------------------------- карточка «Оформление»
     def _build_overlay_card(self):
-        card = self._card("Оверлей перевода")
+        # Одна карточка на всё оформление: оверлей, тема и ярлык. Отдельная
+        # «Оформление лаунчера» дублировала выбор темы и выглядела как лишний блок.
+        card = self._card("Оформление")
 
         self.overlay_enabled_var = ctk.BooleanVar(value=True)
         self.overlay_source_var = ctk.BooleanVar(value=True)
@@ -774,13 +721,18 @@ class TranslatorLauncher(ctk.CTk):
         )
         self.position_menu.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=4)
 
+        # Тема — единая настройка: и лаунчер, и карточка перевода.
         ctk.CTkLabel(
-            grid, text="Цвет", font=ctk.CTkFont(size=12), text_color=MUTED,
+            grid, text="Тема", font=ctk.CTkFont(size=12), text_color=MUTED,
         ).grid(row=1, column=0, sticky="w", pady=4)
-        self.accent_hint = ctk.CTkLabel(
-            grid, text="", font=ctk.CTkFont(size=12), text_color=TEXT, anchor="w",
+        self.theme_menu = ctk.CTkOptionMenu(
+            grid, values=list(THEME_LABELS.keys()),
+            command=self._on_theme_changed,
+            fg_color=BG, button_color="#2a2a3a", button_hover_color="#3a3a4c",
+            dropdown_fg_color=CARD, dropdown_hover_color="#2a2a3a",
+            text_color=TEXT, font=ctk.CTkFont(size=13),
         )
-        self.accent_hint.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=4)
+        self.theme_menu.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=4)
 
         self.opacity_value = self._slider_row(
             grid, 2, "Прозрачность", 0.3, 1.0, 0.01,
@@ -794,7 +746,7 @@ class TranslatorLauncher(ctk.CTk):
         )
 
         bottom = ctk.CTkFrame(card, fg_color="transparent")
-        bottom.pack(fill="x", padx=20, pady=(8, 16))
+        bottom.pack(fill="x", padx=20, pady=(8, 10))
         ctk.CTkCheckBox(
             bottom, text="Показывать оригинал (EN)", variable=self.overlay_source_var,
             command=self._schedule_persist,
@@ -809,6 +761,40 @@ class TranslatorLauncher(ctk.CTk):
             font=ctk.CTkFont(size=12), text_color=TEXT,
         )
         self.test_overlay_btn.pack(side="right")
+
+        # --- ярлык на рабочем столе ---
+        self.create_shortcut_var = ctk.BooleanVar(
+            value=bool(self.settings.get("create_shortcut", True))
+        )
+        ctk.CTkCheckBox(
+            card, text="Создавать ярлык на рабочем столе при запуске",
+            variable=self.create_shortcut_var, command=self._schedule_persist,
+            font=ctk.CTkFont(size=12), text_color=MUTED,
+            checkbox_width=16, checkbox_height=16,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+        ).pack(anchor="w", padx=20, pady=(0, 4))
+
+        shortcut_row = ctk.CTkFrame(card, fg_color="transparent")
+        shortcut_row.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkButton(
+            shortcut_row, text="Создать ярлык сейчас", command=self._create_shortcut_now,
+            height=30, corner_radius=8, width=180,
+            fg_color="#2a2a3a", hover_color="#3a3a4c",
+            font=ctk.CTkFont(size=12), text_color=TEXT,
+        ).pack(side="left")
+        self.shortcut_hint = ctk.CTkLabel(
+            shortcut_row, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
+        )
+        self.shortcut_hint.pack(side="left", padx=(10, 0))
+
+        self.theme_hint = ctk.CTkLabel(
+            card, text=(
+                "Тема применяется к лаунчеру и к карточке перевода "
+                "(карточка перекрасится после перезапуска переводчика)."
+            ),
+            font=ctk.CTkFont(size=11), text_color=MUTED, wraplength=520, justify="left",
+        )
+        self.theme_hint.pack(fill="x", padx=20, pady=(0, 14))
 
     def _slider_row(self, parent, row, title, low, high, step, fmt):
         ctk.CTkLabel(
@@ -960,9 +946,6 @@ class TranslatorLauncher(ctk.CTk):
 
         theme = self.settings.get("launcher_theme", "violet")
         self.theme_menu.set(THEME_KEYS.get(theme, "Фиолетовая"))
-        self.accent_hint.configure(
-            text=f"{THEME_KEYS.get(theme, 'Фиолетовая')} — как тема лаунчера"
-        )
 
         self._set_slider(self.opacity_value, self.settings.get("overlay_opacity", 0.93))
         self._set_slider(self.font_value, self.settings.get("overlay_font_size", 18))
