@@ -35,7 +35,7 @@ DEFAULT_SETTINGS = {
     "overlay_width": 640,                     # 320 .. 1400
     "overlay_duration": 12.0,                 # секунд до автоскрытия
     "overlay_show_source": True,              # показывать оригинал EN
-    "overlay_accent": "violet",               # "violet" | "blue" | "green" | "orange"
+    "overlay_accent": "violet",               # = launcher_theme (единая тема)
 
     # --- лаунчер ---
     "launcher_theme": "violet",               # см. LAUNCHER_THEMES
@@ -49,7 +49,7 @@ OVERLAY_POSITIONS = (
     "bottom-center", "top-center", "center",
     "top-left", "top-right", "bottom-left", "bottom-right",
 )
-OVERLAY_ACCENTS = ("violet", "blue", "green", "orange")
+OVERLAY_ACCENTS = ("violet", "blue", "green", "orange", "crimson", "mono")
 LAUNCHER_THEMES = ("violet", "blue", "green", "orange", "crimson", "mono")
 
 
@@ -82,15 +82,19 @@ def _sanitize(settings):
         data["ocr_gpu"] = "auto"
     if data.get("overlay_position") not in OVERLAY_POSITIONS:
         data["overlay_position"] = DEFAULT_SETTINGS["overlay_position"]
-    if data.get("overlay_accent") not in OVERLAY_ACCENTS:
-        data["overlay_accent"] = DEFAULT_SETTINGS["overlay_accent"]
 
+    # Единая система оформления: тема лаунчера задаёт и цвет карточки перевода.
+    # Старые файлы могли иметь только overlay_accent — используем его как тему,
+    # чтобы после обновления цвет не «сбросился» на фиолетовый.
     theme = data.get("launcher_theme")
+    if not (isinstance(theme, str) and theme.strip()):
+        theme = data.get("overlay_accent")
     if isinstance(theme, str):
         theme = theme.strip().lower()
     if theme not in LAUNCHER_THEMES:
         theme = DEFAULT_SETTINGS["launcher_theme"]
     data["launcher_theme"] = theme
+    data["overlay_accent"] = theme
     data["create_shortcut"] = bool(data.get("create_shortcut", True))
 
     data["overlay_enabled"] = bool(data.get("overlay_enabled", True))

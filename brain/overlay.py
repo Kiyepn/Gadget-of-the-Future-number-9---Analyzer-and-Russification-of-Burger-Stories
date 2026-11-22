@@ -47,6 +47,8 @@ ACCENTS = {
     "blue": "#2563EB",
     "green": "#16A34A",
     "orange": "#EA580C",
+    "crimson": "#DC2626",
+    "mono": "#6B7280",
 }
 STATUS_OK = "#4ADE80"
 STATUS_ERROR = "#F87171"

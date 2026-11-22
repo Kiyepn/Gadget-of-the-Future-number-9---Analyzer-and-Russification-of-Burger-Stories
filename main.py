@@ -444,7 +444,9 @@ def _capture_loop(ocr, translate, analyze_character, clear_memory):
                 paused = not paused
                 if _overlay is not None:
                     if paused:
-                        _overlay.show_status("⏸ Пауза", "info", duration=0)
+                        # Короткая карточка, а не «вечная» плашка: постоянный
+                        # статус перекрывал лаунчер и другие окна.
+                        _overlay.show_status("⏸ Пауза", "info", duration=4)
                     else:
                         _overlay.show_status("▶ Продолжаю", "ok", duration=3)
                 log.info("Пауза: %s", "вкл" if paused else "выкл")
@@ -577,7 +579,7 @@ def _run_translator(args):
 
         if _overlay is not None:
             if elevated:
-                _overlay.show_status(_ELEVATION_WARNING, "error", duration=0)
+                _overlay.show_status(_ELEVATION_WARNING, "error", duration=15)
             else:
                 _overlay.show_status(
                     "Готово. F6 — повторить, F7 — скрыть, F8 — пауза, F9 — очистить память.",

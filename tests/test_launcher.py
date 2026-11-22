@@ -128,5 +128,36 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(path.endswith(".lnk"))
 
 
+class ThemeUnificationTests(unittest.TestCase):
+    """Тема лаунчера и цвет карточки перевода — одна настройка."""
+
+    def test_theme_sets_overlay_accent(self):
+        from brain.settings import _sanitize
+
+        data = _sanitize({"launcher_theme": "mono", "overlay_accent": "violet"})
+        self.assertEqual(data["launcher_theme"], "mono")
+        self.assertEqual(data["overlay_accent"], "mono")
+
+    def test_legacy_overlay_accent_becomes_theme(self):
+        from brain.settings import _sanitize
+
+        data = _sanitize({"launcher_theme": "", "overlay_accent": "orange"})
+        self.assertEqual(data["launcher_theme"], "orange")
+        self.assertEqual(data["overlay_accent"], "orange")
+
+    def test_unknown_theme_falls_back_and_stays_in_sync(self):
+        from brain.settings import _sanitize
+
+        data = _sanitize({"launcher_theme": "tesseract"})
+        self.assertEqual(data["launcher_theme"], "violet")
+        self.assertEqual(data["overlay_accent"], "violet")
+
+    def test_new_accents_exist_in_overlay_palette(self):
+        from brain.overlay import ACCENTS
+
+        for name in ("crimson", "mono"):
+            self.assertIn(name, ACCENTS)
+
+
 if __name__ == "__main__":
     unittest.main()

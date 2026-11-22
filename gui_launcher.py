@@ -399,14 +399,6 @@ POSITION_LABELS = {
 }
 POSITION_KEYS = {v: k for k, v in POSITION_LABELS.items()}
 
-ACCENT_LABELS = {
-    "Фиолетовый": "violet",
-    "Синий": "blue",
-    "Зелёный": "green",
-    "Оранжевый": "orange",
-}
-ACCENT_KEYS = {v: k for k, v in ACCENT_LABELS.items()}
-
 
 def _is_windows():
     return os.name == "nt"
@@ -445,6 +437,10 @@ class TranslatorLauncher(ctk.CTk):
         self._downloading_model = None
         self._download_cancel = threading.Event()
         self._shortcut_announced = False
+        # Плавная полоска загрузки: цель (0..1) и текущее отображаемое значение.
+        self._dl_target = 0.0
+        self._dl_shown = 0.0
+        self._dl_anim_job = None
         # Очередь «сделать в UI-потоке»: фоновые потоки НЕ трогают Tk напрямую
         # (after() из чужого потока может упасть с «main thread is not in main
         # loop»), а кладут сюда колбэк — его выполняет _drain_ui_queue.
@@ -468,6 +464,31 @@ class TranslatorLauncher(ctk.CTk):
         self.after(800, self._ensure_shortcut_async)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Карточка перевода — TOPMOST-окно другого процесса. Пока лаунчер в фокусе,
+        # поднимаем его выше, чтобы перевод не накрывал кнопки и настройки.
+        # Только <Activate>/<Deactivate> (события окна): <FocusIn>/<FocusOut>
+        # срабатывают и при переходе фокуса между полями ввода и заставляли окно
+        # мигать topmost-состоянием.
+        self.bind("<Activate>", self._on_window_activate)
+        self.bind("<Deactivate>", self._on_window_deactivate)
+        self._topmost_for_focus = False
+
+    def _on_window_activate(self, _event=None):
+        try:
+            if not self._topmost_for_focus:
+                self.attributes("-topmost", True)
+                self._topmost_for_focus = True
+        except Exception:
+            pass
+
+    def _on_window_deactivate(self, _event=None):
+        try:
+            if self._topmost_for_focus:
+                self.attributes("-topmost", False)
+                self._topmost_for_focus = False
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -713,7 +734,10 @@ class TranslatorLauncher(ctk.CTk):
         self.shortcut_hint.pack(side="left", padx=(10, 0))
 
         self.theme_hint = ctk.CTkLabel(
-            card, text="Тема меняет оформление окна лаунчера. Обои — в следующем обновлении.",
+            card, text=(
+                "Тема меняет и лаунчер, и карточку перевода (карточка перекрасится "
+                "после перезапуска переводчика). Обои — в следующем обновлении."
+            ),
             font=ctk.CTkFont(size=11), text_color=MUTED, wraplength=520, justify="left",
         )
         self.theme_hint.pack(fill="x", padx=20, pady=(0, 14))
@@ -753,14 +777,10 @@ class TranslatorLauncher(ctk.CTk):
         ctk.CTkLabel(
             grid, text="Цвет", font=ctk.CTkFont(size=12), text_color=MUTED,
         ).grid(row=1, column=0, sticky="w", pady=4)
-        self.accent_menu = ctk.CTkOptionMenu(
-            grid, values=list(ACCENT_LABELS.keys()),
-            command=lambda _v: self._schedule_persist(),
-            fg_color=BG, button_color="#2a2a3a", button_hover_color="#3a3a4c",
-            dropdown_fg_color=CARD, dropdown_hover_color="#2a2a3a",
-            text_color=TEXT, font=ctk.CTkFont(size=13),
+        self.accent_hint = ctk.CTkLabel(
+            grid, text="", font=ctk.CTkFont(size=12), text_color=TEXT, anchor="w",
         )
-        self.accent_menu.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=4)
+        self.accent_hint.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=4)
 
         self.opacity_value = self._slider_row(
             grid, 2, "Прозрачность", 0.3, 1.0, 0.01,
@@ -938,15 +958,16 @@ class TranslatorLauncher(ctk.CTk):
         position = self.settings.get("overlay_position", "bottom-center")
         self.position_menu.set(POSITION_KEYS.get(position, "Снизу по центру"))
 
-        accent = self.settings.get("overlay_accent", "violet")
-        self.accent_menu.set(ACCENT_KEYS.get(accent, "Фиолетовый"))
+        theme = self.settings.get("launcher_theme", "violet")
+        self.theme_menu.set(THEME_KEYS.get(theme, "Фиолетовая"))
+        self.accent_hint.configure(
+            text=f"{THEME_KEYS.get(theme, 'Фиолетовая')} — как тема лаунчера"
+        )
 
         self._set_slider(self.opacity_value, self.settings.get("overlay_opacity", 0.93))
         self._set_slider(self.font_value, self.settings.get("overlay_font_size", 18))
         self._set_slider(self.duration_value, self.settings.get("overlay_duration", 12))
 
-        theme = self.settings.get("launcher_theme", "violet")
-        self.theme_menu.set(THEME_KEYS.get(theme, "Фиолетовая"))
         self.create_shortcut_var.set(bool(self.settings.get("create_shortcut", True)))
 
         if _is_elevated():
@@ -974,7 +995,7 @@ class TranslatorLauncher(ctk.CTk):
             "overlay_position": POSITION_LABELS.get(
                 self.position_menu.get(), "bottom-center"
             ),
-            "overlay_accent": ACCENT_LABELS.get(self.accent_menu.get(), "violet"),
+            "overlay_accent": self._theme,  # единая тема лаунчера и карточки перевода
             "overlay_opacity": round(float(self.opacity_value.get()), 2),
             "overlay_font_size": int(round(float(self.font_value.get()))),
             "overlay_duration": float(round(float(self.duration_value.get()))),
@@ -1210,7 +1231,18 @@ class TranslatorLauncher(ctk.CTk):
 
     # ------------------------------------------------- Ollama: загрузка модели
     def _show_download_card(self, model):
-        self.dl_status.configure(text=f"Скачиваю модель {model}...", text_color=TEXT)
+        self._dl_target = 0.0
+        self._dl_shown = 0.0
+        if self._dl_anim_job is not None:
+            try:
+                self.after_cancel(self._dl_anim_job)
+            except Exception:
+                pass
+            self._dl_anim_job = None
+        self.dl_status.configure(
+            text=f"Скачиваю модель {model} — можно продолжать настройку.",
+            text_color=TEXT,
+        )
         self.dl_percent.configure(text="0%")
         self.dl_eta.configure(text="")
         self.dl_progress.configure(mode="determinate")
@@ -1242,13 +1274,12 @@ class TranslatorLauncher(ctk.CTk):
         except Exception:
             pass
 
-    def _dl_tracker_update(self, info, status=None):
-        """Обновляет карточку прогресса из DownloadTracker (общий прогресс + ETA)."""
+    def _dl_tracker_update(self, info):
+        """Обновляет цифры прогресса; полоска двигается плавно в _dl_animate."""
         try:
-            if status:
-                self.dl_status.configure(text=status)
             fraction = info.get("fraction")
             if fraction is None:
+                self._dl_target = 0.0
                 if str(self.dl_progress.cget("mode")) != "indeterminate":
                     self.dl_progress.configure(mode="indeterminate")
                     self.dl_progress.start()
@@ -1257,8 +1288,9 @@ class TranslatorLauncher(ctk.CTk):
                 return
 
             fraction = max(0.0, min(1.0, float(fraction)))
-            self.dl_progress.configure(mode="determinate")
-            self.dl_progress.set(fraction)
+            # Только вперёд: когда Ollama объявляет новый слой, знаменатель растёт
+            # и «честный» процент падает — визуально это и было дёрганьем.
+            self._dl_target = max(self._dl_target, fraction)
 
             parts = [
                 f"{format_bytes(info.get('completed'))} / {format_bytes(info.get('total'))}",
@@ -1274,8 +1306,25 @@ class TranslatorLauncher(ctk.CTk):
             if info.get("eta") is not None:
                 extra.append(format_duration(info["eta"]))
             self.dl_eta.configure(text="   ·   ".join(extra) if extra else "")
+
+            if self._dl_anim_job is None:
+                self._dl_animate()
         except Exception:
             pass
+
+    def _dl_animate(self):
+        """Плавно подтягивает полоску к цели (шаг ~80 мс) вместо скачков."""
+        try:
+            if self._dl_shown < self._dl_target - 0.0005:
+                step = max(0.004, (self._dl_target - self._dl_shown) * 0.2)
+                self._dl_shown = min(self._dl_target, self._dl_shown + step)
+                self.dl_progress.configure(mode="determinate")
+                self.dl_progress.set(self._dl_shown)
+                self._dl_anim_job = self.after(80, self._dl_animate)
+            else:
+                self._dl_anim_job = None
+        except Exception:
+            self._dl_anim_job = None
 
     def _dl_progress_update(self, status=None, completed=None, total=None):
         try:
@@ -1374,7 +1423,7 @@ class TranslatorLauncher(ctk.CTk):
                 now = time.monotonic()
                 if now - last_emit >= 0.2:
                     last_emit = now
-                    self._ui_call(self._dl_tracker_update, info, status or None)
+                    self._ui_call(self._dl_tracker_update, info)
 
         self._ui_call(self._dl_log, "Загрузка завершена.")
         self._ui_call(self._finish_download, True, "")
@@ -1436,6 +1485,13 @@ class TranslatorLauncher(ctk.CTk):
         model = self._downloading_model or self.ollama_model_var.get().strip()
         self._downloading_model = None
         self._download_cancel.clear()
+        if self._dl_anim_job is not None:
+            try:
+                self.after_cancel(self._dl_anim_job)
+            except Exception:
+                pass
+            self._dl_anim_job = None
+        self._dl_target = 1.0 if ok else self._dl_shown
         try:
             self.dl_progress.stop()
         except Exception:
@@ -1447,6 +1503,7 @@ class TranslatorLauncher(ctk.CTk):
             pass
 
         if ok:
+            self._dl_shown = 1.0
             self.dl_progress.set(1.0)
             self.dl_percent.configure(text="100% · готово")
             self.dl_eta.configure(text="")
