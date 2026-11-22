@@ -1,5 +1,5 @@
 ﻿# build.ps1
-# Сборка «Гаджет Будущего» v1.5.0-beta (Lightweight) в .exe (--onedir).
+# Сборка «Гаджет Будущего» v1.5.0 (Lightweight) в .exe (--onedir).
 #
 # Запускается через build.bat (ASCII-обёртка). Логика внутри PowerShell, а не
 # cmd, по важной причине: cmd.exe разбирает .bat в текущей кодовой странице
@@ -37,7 +37,7 @@ try {
 }
 
 $AppName = "GadgetOfTheFuture"
-$Version = "v1.5.0-beta"
+$Version = "v1.5.0"
 $SizeLimitMb = 100
 
 function Stop-WithError([string]$Message) {
@@ -237,10 +237,27 @@ Write-Ok "config.py и README.txt на месте, data\ пустая."
 # Архивируем саму папку, а не её содержимое: при распаковке у пользователя
 # появляется одна папка GadgetOfTheFuture, а не 1000+ файлов в текущем каталоге.
 Write-Step "[5/5] Упаковываю релиз в ZIP..."
-try {
-    Compress-Archive -Path $DistDir -DestinationPath $ZipPath -CompressionLevel Optimal -Force -ErrorAction Stop
-} catch {
-    Stop-WithError "Не удалось упаковать ZIP: $($_.Exception.Message)"
+# Повторяем упаковку: сразу после PyInstaller антивирус/индексатор Windows часто
+# ещё держит свежие файлы (симптом — «cannot access ... base_library.zip»).
+$zipOk = $false
+$zipError = $null
+for ($attempt = 1; $attempt -le 6 -and -not $zipOk; $attempt++) {
+    try {
+        if (Test-Path -LiteralPath $ZipPath) {
+            Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+        }
+        Compress-Archive -Path $DistDir -DestinationPath $ZipPath -CompressionLevel Optimal -Force -ErrorAction Stop
+        $zipOk = $true
+    } catch {
+        $zipError = $_.Exception.Message
+        if ($attempt -lt 6) {
+            Write-Host "    попытка $attempt не удалась ($zipError), повтор через 2 с..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+if (-not $zipOk) {
+    Stop-WithError "Не удалось упаковать ZIP: $zipError. Чаще всего это антивирус, который держит файлы только что созданной сборки: подожди 10-20 секунд и запусти сборку снова."
 }
 Write-Ok "ZIP готов."
 
@@ -292,7 +309,7 @@ Write-Host ""
 Write-Host " Дальнейшие шаги:" -ForegroundColor Gray
 Write-Host "   1. Проверь, что переводчик запускается БЕЗ прав администратора."
 Write-Host "   2. Убедись, что ZIP меньше $SizeLimitMb МБ и оверлей работает."
-Write-Host "   3. Публиковать релиз на GitHub пока НЕ нужно (локальная beta)."
+Write-Host "   3. Залей ZIP и .sha256 в GitHub Release (см. docs\release-notes-1.5.0.md)."
 Write-Host "============================================================" -ForegroundColor DarkGray
 
 if ($Host.Name -eq "ConsoleHost" -and [Environment]::UserInteractive) {

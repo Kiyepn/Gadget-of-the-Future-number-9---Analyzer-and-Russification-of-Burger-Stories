@@ -1,0 +1,24 @@
+# Дополнительные зависимости для режима EasyOCR (экспериментально).
+#
+# В стандартную сборку v1.5.0 (Lightweight) они НЕ входят: по умолчанию OCR
+# работает через системный движок Windows (Windows.Media.Ocr), которому ничего
+# скачивать не нужно.
+#
+# Когда это нужно:
+#   * на машине нет языкового пакета OCR (Windows.Media.Ocr недоступен);
+#   * хочется сравнить качество распознавания EasyOCR и Windows OCR на своих
+#     кадрах.
+#
+# Установка (~2 ГБ: torch + torchvision + модели EasyOCR):
+#   python -m pip install -r requirements-easyocr.txt
+#
+# Включение в data/settings.json:
+#   { "ocr_provider": "easyocr" }
+#
+# Важно: собранный .exe из v1.5.0 EasyOCR не содержит — этот режим работает
+# только при запуске из исходников.
+
+easyocr
+torch
+torchvision
+numpy

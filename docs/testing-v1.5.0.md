@@ -1,4 +1,4 @@
-# Как тестировать v1.5.0-beta (Lightweight)
+# Как тестировать v1.5.0 (Lightweight)
 
 Документ для локальной проверки сборки: что запускать, что должно получиться и
 что делать, если не получилось. Всё, кроме отмеченного «вручную», проверяется
@@ -69,7 +69,7 @@ build.bat
 | В корне проекта нет `.spec` | `Get-ChildItem *.spec` | пусто (спека теперь в `build\`) |
 | В сборке есть winrt | `Test-Path dist\GadgetOfTheFuture\_internal\winrt\windows\media\ocr\__init__.py` | `True` |
 | В сборке нет torch/easyocr/numpy | `Get-ChildItem dist\GadgetOfTheFuture\_internal -Directory \| ? Name -match 'torch\|easyocr\|numpy'` | пусто |
-| В ZIP одна папка | `Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead("$PWD\dist\GadgetOfTheFuture-v1.5.0-beta.zip").Entries[0].FullName` | `GadgetOfTheFuture\...` |
+| В ZIP одна папка | `Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead("$PWD\dist\GadgetOfTheFuture-v1.5.0.zip").Entries[0].FullName` | `GadgetOfTheFuture\...` |
 | Рядом с exe есть README.txt | `Test-Path dist\GadgetOfTheFuture\README.txt` | `True` |
 | Хэш совпадает | `Get-FileHash dist\*.zip -Algorithm SHA256` и `Get-Content dist\*.zip.sha256` | одинаковые хэши |
 
@@ -204,7 +204,7 @@ python -m venv .venv-clean
 ```powershell
 $tmp = Join-Path $env:TEMP "gadget_user_test"
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-Expand-Archive dist\GadgetOfTheFuture-v1.5.0-beta.zip -DestinationPath $tmp
+Expand-Archive dist\GadgetOfTheFuture-v1.5.0.zip -DestinationPath $tmp
 Get-ChildItem $tmp | Select-Object Name          # должна быть одна папка
 Start-Process (Join-Path $tmp "GadgetOfTheFuture\GadgetOfTheFuture.exe")
 Start-Sleep 8
@@ -220,7 +220,7 @@ Get-Content (Join-Path $tmp "GadgetOfTheFuture\data\gadget.log") -Tail 8
 
 ### 6.3 Что видит обычный пользователь при скачивании (проверка глазами)
 
-1. Скачай `GadgetOfTheFuture-v1.5.0-beta.zip` (22 МБ) как обычный файл.
+1. Скачай `GadgetOfTheFuture-v1.5.0.zip` (22 МБ) как обычный файл.
 2. Распакуй (правый клик → «Извлечь всё»). Должна появиться **одна** папка
    `GadgetOfTheFuture` с `GadgetOfTheFuture.exe`, `README.txt`, `config.py`,
    `data\` и `_internal\`.

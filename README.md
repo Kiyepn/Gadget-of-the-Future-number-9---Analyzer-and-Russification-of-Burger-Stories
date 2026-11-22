@@ -12,7 +12,7 @@
 
 <img src="https://media1.tenor.com/m/aw8ecOe1s-EAAAAC/untan-yui-hirasawa.gif" width="250" alt="Yui Untan">
 
-### Главное в v1.5.0-beta: Windows Native OCR вместо EasyOCR (Lightweight)
+### Главное в v1.5.0: Windows Native OCR вместо EasyOCR (Lightweight)
 OCR переехал с `EasyOCR` на системный движок Windows (`Windows.Media.Ocr`):
 - **Сборка похудела примерно в 20 раз**: папка с exe — ~45 МБ вместо ~938 МБ,
   архив релиза — ~22 МБ вместо сотен мегабайт (torch + torchvision больше не
@@ -21,8 +21,8 @@ OCR переехал с `EasyOCR` на системный движок Windows (
   скачивается при первом запуске (`~/.EasyOCR/model` больше не нужен).
 - Код `brain/ocr_engine.py` (EasyOCR) **не удалён**: старый движок включается
   настройкой `"ocr_provider": "easyocr"` в `data/settings.json`, но для этого его
-  нужно поставить отдельно (`pip install easyocr`) — в lightweight-сборку он не
-  входит.
+  нужно поставить отдельно (`pip install -r requirements-easyocr.txt`, ~2 ГБ) — в
+  lightweight-сборку он не входит. Старый прототип `gadget9.py` лежит в `legacy/`.
 - Нужен языковой пакет OCR Windows для английского (`en-US`): Параметры → Время и
   язык → Язык → Добавить язык. Если пакета нет, в журнале будет понятная ошибка.
 
@@ -74,7 +74,7 @@ OCR переехал с `EasyOCR` на системный движок Windows (
 - Pillow, requests, pynput, numpy, customtkinter, winrt (см. `requirements.txt`)
 - Установка зависимостей: `pip install -r requirements.txt`
 
-> EasyOCR/torch в `requirements.txt` **не входят** с v1.5.0-beta. Если нужен
+> EasyOCR/torch в `requirements.txt` **не входят** с v1.5.0. Если нужен
 > старый движок — раскомментируйте три строки в конце файла.
 
 ### Запуск
@@ -146,7 +146,7 @@ build.bat
 ```
 `build.bat` — тонкая ASCII-обёртка (cmd.exe ломает разбор больших bat-файлов с
 `chcp`, поэтому вся логика в `build.ps1`). Результат: `dist\GadgetOfTheFuture\GadgetOfTheFuture.exe`
-и готовый архив `dist\GadgetOfTheFuture-v1.5.0-beta.zip` (~22 МБ) плюс
+и готовый архив `dist\GadgetOfTheFuture-v1.5.0.zip` (~22 МБ) плюс
 `*.zip.sha256` для сверки. Внутри архива одна папка `GadgetOfTheFuture` с exe,
 `README.txt` (инструкция для пользователя), `config.py` и пустой `data\`.
 Сгенерированный PyInstaller'ом `.spec` теперь пишется в `build\`, а не в корень.
