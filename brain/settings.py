@@ -37,6 +37,10 @@ DEFAULT_SETTINGS = {
     "overlay_show_source": True,              # показывать оригинал EN
     "overlay_accent": "violet",               # "violet" | "blue" | "green" | "orange"
 
+    # --- лаунчер ---
+    "launcher_theme": "violet",               # см. LAUNCHER_THEMES
+    "create_shortcut": True,                  # ярлык на рабочем столе (собранный exe)
+
     # --- прочее ---
     "log_level": "INFO",
 }
@@ -46,6 +50,7 @@ OVERLAY_POSITIONS = (
     "top-left", "top-right", "bottom-left", "bottom-right",
 )
 OVERLAY_ACCENTS = ("violet", "blue", "green", "orange")
+LAUNCHER_THEMES = ("violet", "blue", "green", "orange", "crimson", "mono")
 
 
 def settings_path():
@@ -79,6 +84,14 @@ def _sanitize(settings):
         data["overlay_position"] = DEFAULT_SETTINGS["overlay_position"]
     if data.get("overlay_accent") not in OVERLAY_ACCENTS:
         data["overlay_accent"] = DEFAULT_SETTINGS["overlay_accent"]
+
+    theme = data.get("launcher_theme")
+    if isinstance(theme, str):
+        theme = theme.strip().lower()
+    if theme not in LAUNCHER_THEMES:
+        theme = DEFAULT_SETTINGS["launcher_theme"]
+    data["launcher_theme"] = theme
+    data["create_shortcut"] = bool(data.get("create_shortcut", True))
 
     data["overlay_enabled"] = bool(data.get("overlay_enabled", True))
     data["overlay_show_source"] = bool(data.get("overlay_show_source", True))

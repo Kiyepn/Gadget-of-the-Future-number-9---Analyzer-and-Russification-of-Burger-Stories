@@ -1,24 +1,42 @@
 # gui_launcher.py
-"""Графический лаунчер «Гаджет Будущего» v1.4.2.
+"""Графический лаунчер «Гаджет Будущего» v1.5.1.
 
-Что изменилось в v1.4.2 (почему переписан интерфейс):
+Что изменилось в v1.5.1 (багфиксы после релиза 1.5.0):
+
+* **Проверка Ollama.** При старте и при выборе «Ollama (локально)» лаунчер
+  проверяет CLI (`shutil.which`) и сервис (`http://127.0.0.1:11434`). Если
+  Ollama нет — вместо строки в журнале показывается баннер с кнопкой «Скачать
+  Ollama», которая открывает https://ollama.com/download/windows.
+* **Загрузка модели с прогрессом.** Вместо скрытого `ollama pull` — потоковая
+  загрузка через `POST /api/pull` (NDJSON): полоска прогресса, проценты, объём
+  в ГБ и консоль со стадиями («pulling manifest», «verifying sha256 digest»…).
+  Есть отмена. Если API недоступен, используется CLI с определением прогресса
+  по `ollama list`.
+* **Ярлык на рабочем столе** создаётся при первом запуске собранного .exe
+  (настройка «Создавать ярлык на рабочем столе» + кнопка «Создать ярлык»).
+* **Оформление лаунчера**: темы (фиолетовая/синяя/зелёная/оранжевая/багровая/
+  моно) применяются ко всему окну, а не только к карточке перевода.
+
+Что было раньше (v1.4.2):
 
 * Переводчик больше не печатает перевод в консоль: он показывает его в
-  оверлее поверх игры (brain/overlay.py). Лаунчер запускает его без окна
-  консоли и показывает живой лог прямо у себя.
-* Лаунчер больше НЕ запрашивает права администратора. Запуск с правами
-  администратора включал UIPI и делал оверлей невидимым поверх обычных окон,
-  поэтому приложение работает с обычными правами (asInvoker).
-* Появилась карточка настроек оверлея: позиция, прозрачность, размер шрифта,
-  время показа, цвет и показ оригинала.
-* Видно, где лежат данные (память, настройки, лог) и есть кнопка, чтобы
-  открыть эту папку — раньше было непонятно, куда всё сохраняется.
+  оверлее поверх игры (brain/overlay.py), а лаунчер показывает живой лог.
+* Лаунчер не запрашивает права администратора: иначе UIPI делал оверлей
+  невидимым поверх обычных окон.
 """
 
+import json
+import logging
 import os
+import queue
+import shutil
 import subprocess
 import sys
 import threading
+import time
+import webbrowser
+
+import requests
 
 # Гарантируем, что корень проекта в sys.path (нужно для импорта пакета brain).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,23 +61,223 @@ except ImportError:
 
 from brain.logging_setup import log_file_path, setup_logging
 from brain.paths import app_root, data_location_hint
-from brain.settings import load_settings, save_settings
+from brain.settings import LAUNCHER_THEMES, load_settings, save_settings
 from brain.version import __version__
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-# --- Палитра тёмной темы ---
-BG = "#12121a"
-CARD = "#1c1c28"
-CARD_BORDER = "#2a2a3a"
-TEXT = "#e6e6ef"
-MUTED = "#8a8aa0"
-ACCENT = "#7c3aed"
-ACCENT_HOVER = "#8f52ff"
+# --- Ollama ---
+OLLAMA_HOST = "http://127.0.0.1:11434"
+OLLAMA_DOWNLOAD_URL = "https://ollama.com/download/windows"
+OLLAMA_PING_TIMEOUT = 1.5
+OLLAMA_MODEL_TIMEOUT = 2.5
+
+# --- Палитры лаунчера -------------------------------------------------------
+# Тема меняет оформление самого лаунчера (фон, карточки, акцент), а не только
+# карточки перевода. Значения подставляются в модульные глобалы ниже, поэтому
+# после смены темы интерфейс пересобирается (см. _rebuild_ui).
+THEMES = {
+    "violet": {
+        "bg": "#12121a", "card": "#1c1c28", "border": "#2a2a3a",
+        "text": "#e6e6ef", "muted": "#8a8aa0",
+        "accent": "#7c3aed", "accent_hover": "#8f52ff",
+    },
+    "blue": {
+        "bg": "#0e1621", "card": "#16222f", "border": "#233648",
+        "text": "#e4eef7", "muted": "#8aa0b4",
+        "accent": "#2563eb", "accent_hover": "#3b82f6",
+    },
+    "green": {
+        "bg": "#0f1714", "card": "#17251f", "border": "#264034",
+        "text": "#e4f2ea", "muted": "#8cb09c",
+        "accent": "#16a34a", "accent_hover": "#22c55e",
+    },
+    "orange": {
+        "bg": "#1a1410", "card": "#251b14", "border": "#3d2b1e",
+        "text": "#f5e9dd", "muted": "#b39a83",
+        "accent": "#ea580c", "accent_hover": "#f97316",
+    },
+    "crimson": {
+        "bg": "#1a1013", "card": "#251519", "border": "#3d2229",
+        "text": "#f7e4e8", "muted": "#b4878f",
+        "accent": "#dc2626", "accent_hover": "#ef4444",
+    },
+    "mono": {
+        "bg": "#101012", "card": "#1a1a1d", "border": "#2c2c31",
+        "text": "#e8e8ea", "muted": "#9a9aa2",
+        "accent": "#6b7280", "accent_hover": "#9ca3af",
+    },
+}
+
+THEME_LABELS = {
+    "Фиолетовая": "violet",
+    "Синяя": "blue",
+    "Зелёная": "green",
+    "Оранжевая": "orange",
+    "Багровая": "crimson",
+    "Монохромная": "mono",
+}
+THEME_KEYS = {v: k for k, v in THEME_LABELS.items()}
+
+# Значения по умолчанию; apply_theme() перезаписывает их при старте и при
+# смене темы, а интерфейс строится уже с новыми цветами.
+BG = THEMES["violet"]["bg"]
+CARD = THEMES["violet"]["card"]
+CARD_BORDER = THEMES["violet"]["border"]
+TEXT = THEMES["violet"]["text"]
+MUTED = THEMES["violet"]["muted"]
+ACCENT = THEMES["violet"]["accent"]
+ACCENT_HOVER = THEMES["violet"]["accent_hover"]
+
 SUCCESS = "#4ade80"
 ERROR = "#f87171"
 WARN = "#fbbf24"
+
+
+def apply_theme(name):
+    """Применяет палитру лаунчера. Возвращает фактическое имя темы."""
+    global BG, CARD, CARD_BORDER, TEXT, MUTED, ACCENT, ACCENT_HOVER
+    name = (name or "violet").lower()
+    if name not in THEMES:
+        name = "violet"
+    theme = THEMES[name]
+    BG = theme["bg"]
+    CARD = theme["card"]
+    CARD_BORDER = theme["border"]
+    TEXT = theme["text"]
+    MUTED = theme["muted"]
+    ACCENT = theme["accent"]
+    ACCENT_HOVER = theme["accent_hover"]
+    return name
+
+
+def normalize_model_name(name):
+    """«translategemma:4b» -> («translategemma», «4b»); без тега — «latest»."""
+    raw = (name or "").strip().lower()
+    if not raw:
+        return "", ""
+    if ":" in raw:
+        base, tag = raw.rsplit(":", 1)
+        return base, (tag or "latest")
+    return raw, "latest"
+
+
+def model_names_match(left, right):
+    """Сравнивает имена моделей Ollama с учётом неявного тега «latest»."""
+    return normalize_model_name(left) == normalize_model_name(right)
+
+
+def format_bytes(value):
+    """Человекочитаемый объём для прогресса загрузки."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    if value >= 1024 ** 3:
+        return f"{value / 1024 ** 3:.2f} ГБ"
+    if value >= 1024 ** 2:
+        return f"{value / 1024 ** 2:.0f} МБ"
+    if value >= 1024:
+        return f"{value / 1024:.0f} КБ"
+    return f"{int(value)} Б"
+
+
+def _ps_quote(value):
+    """Экранирует строку для одинарных кавычек PowerShell."""
+    return str(value).replace("'", "''")
+
+
+def desktop_dir():
+    """Путь к рабочему столу (учитывает перенос папки в OneDrive)."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            folder_id = _GUID(
+                0xB4BFCC3A, 0xDB2C, 0x424C,
+                (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41),
+            )
+            path_ptr = ctypes.c_wchar_p()
+            shell32 = ctypes.windll.shell32
+            shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+            hr = shell32.SHGetKnownFolderPath(
+                ctypes.byref(folder_id), 0, None, ctypes.byref(path_ptr)
+            )
+            if hr == 0 and path_ptr.value:
+                path = str(path_ptr.value)
+                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+                return path
+        except Exception:
+            pass
+    return os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+
+
+def create_shortcut(lnk_path):
+    """Создаёт .lnk на рабочем столе средствами WScript.Shell.
+
+    Возвращает путь к ярлыку или None при ошибке. Цель — собранный .exe, а в
+    dev-режиме — pythonw.exe + gui_launcher.py, чтобы ярлык тоже работал.
+    """
+    if os.name != "nt":
+        return None
+
+    if getattr(sys, "frozen", False):
+        target = sys.executable
+        arguments = ""
+        icon = sys.executable
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        target = pythonw if os.path.exists(pythonw) else sys.executable
+        arguments = f'"{os.path.join(app_root(), "gui_launcher.py")}"'
+        icon = target
+
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$ws = New-Object -ComObject WScript.Shell\n"
+        f"$sc = $ws.CreateShortcut('{_ps_quote(lnk_path)}')\n"
+        f"$sc.TargetPath = '{_ps_quote(target)}'\n"
+        f"$sc.Arguments = '{_ps_quote(arguments)}'\n"
+        f"$sc.WorkingDirectory = '{_ps_quote(app_root())}'\n"
+        f"$sc.IconLocation = '{_ps_quote(icon)}'\n"
+        "$sc.Description = 'Гаджет Будущего - переводчик визуальных новелл'\n"
+        "$sc.Save()\n"
+    )
+
+    import tempfile
+
+    handle, script_path = tempfile.mkstemp(prefix="gadget_lnk_", suffix=".ps1")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8-sig") as stream:
+            stream.write(script)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", script_path,
+            ],
+            capture_output=True, text=True, timeout=60, creationflags=flags,
+        )
+        if result.returncode != 0 or not os.path.exists(lnk_path):
+            return None
+        return lnk_path
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+
 
 PROVIDER_LABELS = {
     "Ollama (локально)": "ollama",
@@ -118,11 +336,26 @@ class TranslatorLauncher(ctk.CTk):
 
         setup_logging()
         self.settings = load_settings()
+        self._theme = apply_theme(self.settings.get("launcher_theme", "violet"))
+
         self.process = None
         self.ollama_pull_proc = None
         self._test_process = None
         self._persist_job = None
         self._log_sig = None
+
+        # --- состояние проверки Ollama и загрузки модели ---
+        self._ollama_state = None       # {"cli": bool, "api": bool, "version": str}
+        self._ollama_checking = False
+        self._ollama_checked_at = 0.0
+        self._downloading_model = None
+        self._download_cancel = threading.Event()
+        self._shortcut_announced = False
+        # Очередь «сделать в UI-потоке»: фоновые потоки НЕ трогают Tk напрямую
+        # (after() из чужого потока может упасть с «main thread is not in main
+        # loop»), а кладут сюда колбэк — его выполняет _drain_ui_queue.
+        self._ui_queue = queue.Queue()
+        self.log = logging.getLogger(__name__)
 
         self.title(f"Гаджет Будущего — лаунчер v{__version__}")
         self.geometry("640x920")
@@ -134,6 +367,11 @@ class TranslatorLauncher(ctk.CTk):
         self._refresh_data_location()
         self._refresh_log()
         self._poll_state()
+        self._drain_ui_queue()
+
+        # Стартовые проверки — в фоне, чтобы окно открывалось мгновенно.
+        self.after(300, self._check_ollama_async)
+        self.after(800, self._ensure_shortcut_async)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -152,18 +390,118 @@ class TranslatorLauncher(ctk.CTk):
             font=ctk.CTkFont(size=13), text_color=MUTED,
         ).pack(anchor="w", pady=(2, 0))
 
+        # Баннер «Ollama не установлена» живёт в отдельном контейнере между
+        # заголовком и телом: так его можно показать/скрыть, не трогая порядок
+        # pack-виджетов (у CTkScrollableFrame нельзя указать before=).
+        self.banner_host = ctk.CTkFrame(self, fg_color="transparent", height=0)
+        self.banner_host.pack(fill="x", padx=24)
+        self._build_ollama_banner()
+
         self.body = ctk.CTkScrollableFrame(self, fg_color=BG)
         self.body.pack(fill="both", expand=True, padx=16, pady=(4, 0))
 
         self._build_provider_card()
+        self._build_download_card()
         self._build_overlay_card()
+        self._build_appearance_card()
         self._build_data_card()
         self._build_log_card()
         self._build_footer()
 
+    # -------------------------------------------------- баннер состояния Ollama
+    def _build_ollama_banner(self):
+        self.ollama_banner = ctk.CTkFrame(
+            self.banner_host, fg_color="#2a2110", corner_radius=12,
+            border_width=1, border_color=WARN,
+        )
+        row = ctk.CTkFrame(self.ollama_banner, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=12)
+
+        self.ollama_banner_label = ctk.CTkLabel(
+            row, text="", font=ctk.CTkFont(size=12), text_color=TEXT,
+            wraplength=380, justify="left",
+        )
+        self.ollama_banner_label.pack(side="left", fill="x", expand=True)
+
+        buttons = ctk.CTkFrame(row, fg_color="transparent")
+        buttons.pack(side="right", padx=(10, 0))
+
+        self.ollama_download_btn = ctk.CTkButton(
+            buttons, text="Скачать Ollama", command=self._open_ollama_download,
+            height=32, corner_radius=8, width=150,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff",
+        )
+        self.ollama_download_btn.pack(pady=(0, 4))
+
+        ctk.CTkButton(
+            buttons, text="Проверить снова", command=self._check_ollama_async,
+            height=28, corner_radius=8, width=150,
+            fg_color="#2a2a3a", hover_color="#3a3a4c",
+            font=ctk.CTkFont(size=11), text_color=TEXT,
+        ).pack()
+        # В дерево не пакуем — появится, когда проверка скажет, что есть проблема.
+        self.ollama_banner.pack_forget()
+
+    # ------------------------------------------------------ карточка загрузки
+    def _build_download_card(self):
+        self.download_card = ctk.CTkFrame(
+            self.body, fg_color=CARD, corner_radius=16,
+            border_width=1, border_color=ACCENT,
+        )
+
+        ctk.CTkLabel(
+            self.download_card, text="Загрузка модели",
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=TEXT,
+        ).pack(anchor="w", padx=20, pady=(14, 6))
+
+        self.dl_status = ctk.CTkLabel(
+            self.download_card, text="", font=ctk.CTkFont(size=12),
+            text_color=TEXT, anchor="w", justify="left", wraplength=520,
+        )
+        self.dl_status.pack(fill="x", padx=20)
+
+        self.dl_progress = ctk.CTkProgressBar(
+            self.download_card, height=10, corner_radius=6,
+            progress_color=ACCENT, fg_color="#2a2a3a", mode="determinate",
+        )
+        self.dl_progress.pack(fill="x", padx=20, pady=(8, 4))
+        self.dl_progress.set(0)
+
+        self.dl_percent = ctk.CTkLabel(
+            self.download_card, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
+        )
+        self.dl_percent.pack(anchor="w", padx=20)
+
+        self.dl_log = ctk.CTkTextbox(
+            self.download_card, height=84, fg_color=BG, border_width=1,
+            border_color=CARD_BORDER, text_color=MUTED,
+            font=ctk.CTkFont(family="Consolas", size=11), wrap="word",
+        )
+        self.dl_log.pack(fill="x", padx=20, pady=(8, 6))
+        self.dl_log.configure(state="disabled")
+
+        row = ctk.CTkFrame(self.download_card, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(0, 14))
+        self.dl_hint = ctk.CTkLabel(
+            row, text="Можно продолжать настройку — загрузка идёт в фоне.",
+            font=ctk.CTkFont(size=11), text_color=MUTED,
+        )
+        self.dl_hint.pack(side="left")
+        self.dl_cancel_btn = ctk.CTkButton(
+            row, text="Отмена", command=self._cancel_download,
+            height=28, corner_radius=8, width=100,
+            fg_color="#2a2a3a", hover_color="#3a3a4c",
+            font=ctk.CTkFont(size=11), text_color=TEXT, state="disabled",
+        )
+        self.dl_cancel_btn.pack(side="right")
+
+        self.download_card.pack_forget()
+
     # ------------------------------------------------------- карточка модели
     def _build_provider_card(self):
         card = self._card("Модель перевода")
+        self._provider_card = card
 
         self.provider_seg = ctk.CTkSegmentedButton(
             card,
@@ -229,6 +567,57 @@ class TranslatorLauncher(ctk.CTk):
             wraplength=520, justify="left",
         )
         self.hint.pack(fill="x", padx=20, pady=(0, 14))
+
+    # --------------------------------------------------- карточка оформления
+    def _build_appearance_card(self):
+        card = self._card("Оформление лаунчера")
+
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=20)
+        grid.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            grid, text="Тема", font=ctk.CTkFont(size=12), text_color=MUTED,
+        ).grid(row=0, column=0, sticky="w", pady=4)
+
+        self.theme_menu = ctk.CTkOptionMenu(
+            grid, values=list(THEME_LABELS.keys()),
+            command=self._on_theme_changed,
+            fg_color=BG, button_color="#2a2a3a", button_hover_color="#3a3a4c",
+            dropdown_fg_color=CARD, dropdown_hover_color="#2a2a3a",
+            text_color=TEXT, font=ctk.CTkFont(size=13),
+        )
+        self.theme_menu.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=4)
+
+        self.create_shortcut_var = ctk.BooleanVar(
+            value=bool(self.settings.get("create_shortcut", True))
+        )
+        ctk.CTkCheckBox(
+            card, text="Создавать ярлык на рабочем столе при запуске",
+            variable=self.create_shortcut_var, command=self._schedule_persist,
+            font=ctk.CTkFont(size=12), text_color=MUTED,
+            checkbox_width=16, checkbox_height=16,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+        ).pack(anchor="w", padx=20, pady=(8, 4))
+
+        shortcut_row = ctk.CTkFrame(card, fg_color="transparent")
+        shortcut_row.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkButton(
+            shortcut_row, text="Создать ярлык сейчас", command=self._create_shortcut_now,
+            height=30, corner_radius=8, width=180,
+            fg_color="#2a2a3a", hover_color="#3a3a4c",
+            font=ctk.CTkFont(size=12), text_color=TEXT,
+        ).pack(side="left")
+        self.shortcut_hint = ctk.CTkLabel(
+            shortcut_row, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
+        )
+        self.shortcut_hint.pack(side="left", padx=(10, 0))
+
+        self.theme_hint = ctk.CTkLabel(
+            card, text="Тема меняет оформление окна лаунчера. Обои — в следующем обновлении.",
+            font=ctk.CTkFont(size=11), text_color=MUTED, wraplength=520, justify="left",
+        )
+        self.theme_hint.pack(fill="x", padx=20, pady=(0, 14))
 
     # ------------------------------------------------------- карточка оверлея
     def _build_overlay_card(self):
@@ -457,6 +846,10 @@ class TranslatorLauncher(ctk.CTk):
         self._set_slider(self.font_value, self.settings.get("overlay_font_size", 18))
         self._set_slider(self.duration_value, self.settings.get("overlay_duration", 12))
 
+        theme = self.settings.get("launcher_theme", "violet")
+        self.theme_menu.set(THEME_KEYS.get(theme, "Фиолетовая"))
+        self.create_shortcut_var.set(bool(self.settings.get("create_shortcut", True)))
+
         if _is_elevated():
             self._set_status(
                 "ВНИМАНИЕ: лаунчер запущен с правами администратора. Из-за UIPI "
@@ -497,6 +890,8 @@ class TranslatorLauncher(ctk.CTk):
             "api_key": self.api_key_var.get().strip(),
             "ollama_model": self.ollama_model_var.get().strip() or "translategemma:4b",
             "deepseek_model": self.deepseek_model_var.get().strip() or "deepseek-chat",
+            "launcher_theme": self._theme,
+            "create_shortcut": bool(self.create_shortcut_var.get()),
         })
         try:
             self.settings = save_settings(merged)
@@ -554,6 +949,14 @@ class TranslatorLauncher(ctk.CTk):
                      "сервис Ollama запущен (порт 11434)."
             )
 
+        # Баннер про Ollama: показать/скрыть и при необходимости проверить заново.
+        try:
+            self._update_ollama_banner()
+            if not is_deepseek and self._ollama_state is None:
+                self._check_ollama_async()
+        except Exception:
+            pass
+
     def _toggle_key_visibility(self):
         self.api_entry.configure(show="" if self.show_key_var.get() else "*")
 
@@ -580,13 +983,120 @@ class TranslatorLauncher(ctk.CTk):
             return
         self.ollama_model_var.set(model)
         self._schedule_persist()
-        self._set_status("Проверка модели...")
-        self._check_ollama_model_async(model, self._on_ollama_model_check_done)
+        self._set_status("Проверяю Ollama и модель...")
+        self._check_ollama_async(
+            lambda state: self._after_model_selected(model, state)
+        )
+
+    def _after_model_selected(self, model, state):
+        if not state.get("api"):
+            self._set_status(
+                "Ollama не запущена — сначала установи и запусти её.", kind="warn"
+            )
+            return
+        self._check_ollama_model_async(
+            model, lambda installed: self._on_model_checked(model, installed)
+        )
+
+    def _on_model_checked(self, model, installed):
+        if installed:
+            self._set_status(f"Модель {model} готова к использованию.", kind="ok")
+        else:
+            self._set_status(f"Модели {model} нет — начинаю загрузку.", kind="info")
+            self._start_model_download()
+
+    # ------------------------------------------------------- Ollama: проверка
+    def _ollama_status(self):
+        """CLI + сервис Ollama. Блокирующая проверка — вызывать из потока."""
+        cli_path = shutil.which("ollama")
+        api_ok = False
+        version = ""
+        try:
+            response = requests.get(
+                f"{OLLAMA_HOST}/api/version", timeout=OLLAMA_PING_TIMEOUT
+            )
+            if response.status_code == 200:
+                api_ok = True
+                version = str((response.json() or {}).get("version") or "")
+        except Exception:
+            api_ok = False
+        return {"cli": cli_path, "api": api_ok, "version": version}
+
+    def _check_ollama_async(self, on_done=None):
+        if self._ollama_checking:
+            return
+        self._ollama_checking = True
+
+        def worker():
+            state = self._ollama_status()
+            self._ui_call(self._on_ollama_state, state, on_done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ollama_state(self, state, on_done=None):
+        self._ollama_checking = False
+        self._ollama_state = state
+        self._ollama_checked_at = time.time()
+        self._update_ollama_banner()
+        if callable(on_done):
+            on_done(state)
+
+    def _update_ollama_banner(self):
+        """Показывает баннер, если для Ollama что-то не готово."""
+        state = self._ollama_state
+        if self._provider() != "ollama" or not state:
+            self.ollama_banner.pack_forget()
+            return
+        if state.get("api"):
+            self.ollama_banner.pack_forget()
+            return
+
+        if state.get("cli"):
+            text = (
+                "Ollama установлена, но сервис не запущен. Запусти Ollama "
+                "(из меню «Пуск») и нажми «Проверить снова»."
+            )
+        else:
+            text = (
+                "Ollama не установлена. Скачайте для локального перевода. "
+                "После установки запусти Ollama и нажми «Проверить снова»."
+            )
+        self.ollama_banner_label.configure(text=text)
+        self.ollama_banner.pack(fill="x", pady=(0, 8))
+
+    def _open_ollama_download(self):
+        try:
+            webbrowser.open(OLLAMA_DOWNLOAD_URL, new=2)
+            self._set_status(
+                "Открыл страницу загрузки Ollama. После установки нажми «Проверить снова».",
+            )
+        except Exception as exc:
+            self._set_status(f"Не удалось открыть браузер: {exc}", kind="error")
+
+    # --------------------------------------------------- Ollama: список моделей
+    def _ollama_models(self):
+        try:
+            response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=OLLAMA_MODEL_TIMEOUT)
+            if response.status_code != 200:
+                return []
+            payload = response.json() or {}
+            return [
+                str(item.get("name") or item.get("model") or "")
+                for item in (payload.get("models") or [])
+            ]
+        except Exception:
+            return []
 
     def _ollama_installed(self, model):
+        """True, если модель уже скачана. API — основной путь, CLI — запасной."""
+        for name in self._ollama_models():
+            if model_names_match(name, model):
+                return True
+        if self._ollama_state and self._ollama_state.get("api"):
+            return False
         try:
             result = subprocess.run(
-                ["ollama", "list"], capture_output=True, text=True, timeout=15
+                ["ollama", "list"], capture_output=True, text=True, timeout=20
             )
             return model in (result.stdout or "")
         except Exception:
@@ -595,28 +1105,315 @@ class TranslatorLauncher(ctk.CTk):
     def _check_ollama_model_async(self, model, callback):
         def worker():
             installed = self._ollama_installed(model)
-            self.after(0, callback, installed)
+            self._ui_call(callback, installed)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_ollama_model_check_done(self, installed):
-        if installed:
-            self._set_status("Модель готова к использованию.", kind="ok")
-        else:
-            self._start_model_download()
+    # ------------------------------------------------- Ollama: загрузка модели
+    def _show_download_card(self, model):
+        self.dl_status.configure(text=f"Скачиваю модель {model}...", text_color=TEXT)
+        self.dl_percent.configure(text="0%")
+        self.dl_progress.configure(mode="determinate")
+        self.dl_progress.set(0)
+        self.dl_cancel_btn.configure(state="normal")
+        self.dl_hint.configure(text="Можно продолжать настройку — загрузка идёт в фоне.")
+        self._dl_clear_log()
+        try:
+            self.download_card.pack(fill="x", padx=8, pady=6, after=self._provider_card)
+            self.body._parent_canvas.yview_moveto(0.0)
+        except Exception:
+            pass
+        self._dl_log(f"Модель: {model}")
+        self._dl_log("Соединяюсь с Ollama (POST /api/pull)...")
+
+    def _dl_clear_log(self):
+        self.dl_log.configure(state="normal")
+        self.dl_log.delete("1.0", "end")
+        self.dl_log.configure(state="disabled")
+
+    def _dl_log(self, line):
+        if not line:
+            return
+        try:
+            self.dl_log.configure(state="normal")
+            self.dl_log.insert("end", f"{time.strftime('%H:%M:%S')}  {line}\n")
+            self.dl_log.see("end")
+            self.dl_log.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _dl_progress_update(self, status=None, completed=None, total=None):
+        try:
+            if status:
+                self.dl_status.configure(text=status)
+            if total:
+                fraction = max(0.0, min(1.0, float(completed or 0) / float(total)))
+                self.dl_progress.configure(mode="determinate")
+                self.dl_progress.set(fraction)
+                self.dl_percent.configure(
+                    text=(
+                        f"{format_bytes(completed)} / {format_bytes(total)}"
+                        f"   ·   {fraction * 100:.0f}%"
+                    )
+                )
+            else:
+                if str(self.dl_progress.cget("mode")) != "indeterminate":
+                    self.dl_progress.configure(mode="indeterminate")
+                    self.dl_progress.start()
+                self.dl_percent.configure(text="…")
+        except Exception:
+            pass
 
     def _start_model_download(self):
         model = self.ollama_model_var.get().strip()
         if not model:
             return
-        self._set_status(f"Скачивание модели {model}...")
-        try:
-            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            self.ollama_pull_proc = subprocess.Popen(
-                ["ollama", "pull", model], creationflags=flags
+        if self._downloading_model:
+            self._set_status(
+                f"Уже скачивается модель {self._downloading_model}.", kind="warn"
             )
-        except Exception as e:
-            self._set_status(f"Ошибка скачивания: {e}", kind="error")
+            return
+
+        state = self._ollama_state
+        if not state or not state.get("api"):
+            self._set_status(
+                "Ollama не запущена: установи/запусти её и нажми «Проверить снова».",
+                kind="error",
+            )
+            self._update_ollama_banner()
+            return
+
+        self._downloading_model = model
+        self._download_cancel.clear()
+        self._show_download_card(model)
+        self._set_status(f"Скачивание модели {model}...")
+
+        def worker():
+            try:
+                self._download_via_api(model)
+            except Exception as exc:
+                self._ui_call(self._dl_log, f"Загрузка через API не удалась: {exc}")
+                self._download_via_cli(model)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_via_api(self, model):
+        """Потоковая загрузка через Ollama API: прогресс, объём, стадии."""
+        payload = {"model": model, "name": model, "stream": True}
+        last_status = None
+        with requests.post(
+            f"{OLLAMA_HOST}/api/pull", json=payload, stream=True, timeout=(5, 60)
+        ) as response:
+            if response.status_code != 200:
+                body = (response.text or "")[:200]
+                raise RuntimeError(f"HTTP {response.status_code}: {body}")
+            for raw in response.iter_lines():
+                if self._download_cancel.is_set():
+                    self._ui_call(self._dl_log, "Отменено пользователем.")
+                    self._ui_call(self._finish_download, False, "Загрузка отменена.")
+                    return
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if event.get("error"):
+                    raise RuntimeError(str(event["error"]))
+
+                status = str(event.get("status") or "")
+                total = event.get("total")
+                completed = event.get("completed")
+                if status and status != last_status:
+                    last_status = status
+                    self._ui_call(self._dl_log, status)
+                self._ui_call(self._dl_progress_update, status or None, completed, total)
+
+        self._ui_call(self._dl_log, "Загрузка завершена.")
+        self._ui_call(self._finish_download, True, "")
+
+    def _download_via_cli(self, model):
+        """Запасной путь: `ollama pull` без API (прогресс — по списку моделей)."""
+        executable = shutil.which("ollama")
+        if not executable:
+            self._ui_call(self._finish_download, False, "Ollama не найдена — установите её.")
+            return
+        self._ui_call(self._dl_log, "Пробую запасной путь: ollama pull (CLI)...")
+        self._ui_call(self._dl_progress_update, "Загрузка через CLI...", None, None)
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(
+                [executable, "pull", model],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            self.ollama_pull_proc = proc
+            while proc.poll() is None:
+                if self._download_cancel.is_set():
+                    proc.terminate()
+                    break
+                time.sleep(3)
+                if self._ollama_installed(model):
+                    break
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+
+            if self._download_cancel.is_set():
+                self._ui_call(self._finish_download, False, "Загрузка отменена.")
+                return
+            if self._ollama_installed(model):
+                self._ui_call(self._dl_log, "Модель появилась в списке Ollama.")
+                self._ui_call(self._finish_download, True, "")
+            else:
+                self.after(
+                    0, self._finish_download, False,
+                    "Не удалось скачать модель через CLI — проверь журнал.",
+                )
+        except Exception as exc:
+            self._ui_call(self._finish_download, False, f"Ошибка CLI-загрузки: {exc}")
+        finally:
+            self.ollama_pull_proc = None
+
+    def _cancel_download(self):
+        if not self._downloading_model:
+            return
+        self._download_cancel.set()
+        self.dl_cancel_btn.configure(state="disabled")
+        self.dl_status.configure(text="Останавливаю загрузку...")
+
+    def _finish_download(self, ok, message=""):
+        model = self._downloading_model or self.ollama_model_var.get().strip()
+        self._downloading_model = None
+        self._download_cancel.clear()
+        try:
+            self.dl_progress.stop()
+        except Exception:
+            pass
+        try:
+            self.dl_progress.configure(mode="determinate")
+            self.dl_cancel_btn.configure(state="disabled")
+        except Exception:
+            pass
+
+        if ok:
+            self.dl_progress.set(1.0)
+            self.dl_percent.configure(text="100% · готово")
+            self.dl_status.configure(text=f"Модель {model} скачана.", text_color=SUCCESS)
+            self.dl_hint.configure(text="Теперь можно нажать «Запустить переводчик».")
+            self._dl_log("Готово.")
+            self._set_status(
+                f"Модель {model} готова. Нажми «Запустить переводчик».", kind="ok"
+            )
+        else:
+            self.dl_status.configure(
+                text=message or "Загрузка не удалась.", text_color=ERROR
+            )
+            self.dl_hint.configure(text="Проверь консоль выше и попробуй ещё раз.")
+            self._set_status(message or "Не удалось скачать модель.", kind="error")
+
+    # ------------------------------------------------------------ оформление
+    def _on_theme_changed(self, label):
+        if self._downloading_model:
+            self._set_status("Дождись окончания загрузки — потом сменим тему.", kind="warn")
+            try:
+                self.theme_menu.set(THEME_KEYS.get(self._theme, "Фиолетовая"))
+            except Exception:
+                pass
+            return
+
+        name = THEME_LABELS.get(label, "violet")
+        if name == self._theme:
+            return
+
+        self._persist_now()  # сначала сохраняем текущие правки
+        merged = dict(self.settings)
+        merged["launcher_theme"] = name
+        try:
+            self.settings = save_settings(merged)
+        except Exception as exc:
+            self._set_status(f"Не удалось сохранить тему: {exc}", kind="error")
+            return
+
+        self._rebuild_ui()
+        self._set_status(f"Тема «{label}» применена.", kind="ok")
+
+    def _rebuild_ui(self):
+        """Пересобирает окно после смены палитры."""
+        self._theme = apply_theme(self.settings.get("launcher_theme", "violet"))
+        for child in self.winfo_children():
+            child.destroy()
+        self.configure(fg_color=BG)
+        self._build_ui()
+        self._apply_settings_to_ui()
+        self._refresh_data_location()
+        self._refresh_log()
+        self._update_ollama_banner()
+        try:
+            self.update_idletasks()
+            self.body._parent_canvas.yview_moveto(0.0)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ ярлык
+    def _shortcut_path(self):
+        return os.path.join(desktop_dir(), "Гаджет Будущего.lnk")
+
+    def _ensure_shortcut_async(self):
+        """Создаёт ярлык при первом запуске собранного exe (если включено)."""
+        if not bool(self.settings.get("create_shortcut", True)):
+            return
+        if not getattr(sys, "frozen", False):
+            return
+        lnk = self._shortcut_path()
+        if os.path.exists(lnk):
+            return
+
+        def worker():
+            path = create_shortcut(lnk)
+            self._ui_call(self._on_shortcut_created, path, False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _create_shortcut_now(self):
+        lnk = self._shortcut_path()
+        try:
+            self.shortcut_hint.configure(text="Создаю ярлык...", text_color=MUTED)
+        except Exception:
+            pass
+
+        def worker():
+            path = create_shortcut(lnk)
+            self._ui_call(self._on_shortcut_created, path, True)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_shortcut_created(self, path, manual):
+        if path:
+            try:
+                self.shortcut_hint.configure(
+                    text="Ярлык на рабочем столе создан.", text_color=SUCCESS
+                )
+            except Exception:
+                pass
+            if manual:
+                self._set_status("Ярлык создан на рабочем столе.", kind="ok")
+        else:
+            try:
+                self.shortcut_hint.configure(
+                    text="Не удалось создать ярлык.", text_color=ERROR
+                )
+            except Exception:
+                pass
+            if manual:
+                self._set_status(
+                    "Не удалось создать ярлык. Проверь, что рабочий стол доступен "
+                    "на запись и что PowerShell не заблокирован политикой.",
+                    kind="error",
+                )
 
     # --------------------------------------------------------- запуск/остановка
     def _hidden_flags(self):
@@ -651,10 +1448,12 @@ class TranslatorLauncher(ctk.CTk):
     def _launch_with_model(self, cmd, installed):
         model = self.ollama_model_var.get().strip()
         if not installed:
-            self._start_model_download()
             self._set_status(
-                f"Скачивание модели {model}... Дождитесь окончания и нажмите «Запустить» ещё раз."
+                f"Модели {model} нет — запускаю загрузку. После окончания нажми "
+                "«Запустить» ещё раз.",
+                kind="warn",
             )
+            self._start_model_download()
             return
         self._spawn_process(cmd)
 
@@ -684,6 +1483,20 @@ class TranslatorLauncher(ctk.CTk):
             )
 
         if provider == "ollama":
+            state = self._ollama_state
+            if state is None:
+                # Ещё не проверяли (или проверка ещё идёт) — не блокируем UI.
+                self._set_status("Проверяю Ollama, нажми «Запустить» ещё раз.", kind="warn")
+                self._check_ollama_async()
+                return
+            if not state.get("api"):
+                self._update_ollama_banner()
+                self._set_status(
+                    "Ollama не запущена. Установи её (кнопка «Скачать Ollama») или "
+                    "запусти сервис и нажми «Проверить снова».",
+                    kind="error",
+                )
+                return
             self._set_status("Проверка модели...")
             self._check_ollama_model_async(
                 self.settings.get("ollama_model", ""),
@@ -741,6 +1554,14 @@ class TranslatorLauncher(ctk.CTk):
         self._set_status("Остановлено.", kind="ok")
 
     def _on_close(self):
+        if self._downloading_model:
+            self._download_cancel.set()
+            proc = self.ollama_pull_proc
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
         self._terminate_process()
         if self._test_process and self._test_process.poll() is None:
             try:
@@ -824,7 +1645,33 @@ class TranslatorLauncher(ctk.CTk):
                 f"Переводчик завершился (код {code}). Подробности — в журнале.",
                 kind="warn" if code else "info",
             )
-        self.after(1200, self._poll_state)
+        try:
+            self.after(1200, self._poll_state)
+        except Exception:
+            pass
+
+    # ------------------------------------------------ безопасные UI-колбэки
+    def _ui_call(self, fn, *args):
+        """Ставит колбэк в очередь: выполнится в UI-потоке (см. _drain_ui_queue)."""
+        try:
+            self._ui_queue.put((fn, args))
+        except Exception:
+            pass
+
+    def _drain_ui_queue(self):
+        while True:
+            try:
+                fn, args = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args)
+            except Exception:
+                self.log.exception("Ошибка UI-колбэка из фонового потока")
+        try:
+            self.after(80, self._drain_ui_queue)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
