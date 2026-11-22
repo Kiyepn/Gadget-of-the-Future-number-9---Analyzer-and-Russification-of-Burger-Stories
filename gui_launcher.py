@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import deque
 
 import requests
 
@@ -181,6 +182,99 @@ def format_bytes(value):
     if value >= 1024:
         return f"{value / 1024:.0f} КБ"
     return f"{int(value)} Б"
+
+
+def format_speed(value):
+    """Скорость загрузки: «12.3 МБ/с», «800 КБ/с»."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    if value <= 0:
+        return "0 КБ/с"
+    if value >= 1024 ** 3:
+        return f"{value / 1024 ** 3:.2f} ГБ/с"
+    if value >= 1024 ** 2:
+        return f"{value / 1024 ** 2:.1f} МБ/с"
+    return f"{value / 1024:.0f} КБ/с"
+
+
+def format_duration(seconds):
+    """Сколько осталось: «~15 с», «~4 мин», «~1 ч 5 мин»."""
+    try:
+        seconds = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return "?"
+    if seconds < 1:
+        return "меньше секунды"
+    if seconds < 60:
+        return f"~{seconds} с"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"~{minutes} мин {sec:02d} с" if sec else f"~{minutes} мин"
+    hours, minutes = divmod(minutes, 60)
+    return f"~{hours} ч {minutes:02d} мин"
+
+
+class DownloadTracker:
+    """Общий прогресс, скорость и ETA загрузки модели по событиям /api/pull.
+
+    Ollama присылает прогресс по слоям: у каждого свой ``digest``, ``completed``
+    и ``total``. Поэтому «общий процент» считается как сумма по всем слоям, а
+    скорость — по скользящему окну последних секунд (мгновенная скорость скачет
+    на старте каждого слоя).
+    """
+
+    WINDOW_SECONDS = 8.0
+
+    def __init__(self):
+        self.layers = {}        # digest -> [completed, total]
+        self.samples = deque()  # (monotonic_ts, completed_bytes)
+        self.started_at = None
+
+    def update(self, digest=None, completed=None, total=None, now=None):
+        now = time.monotonic() if now is None else float(now)
+        if self.started_at is None:
+            self.started_at = now
+
+        if digest:
+            entry = self.layers.setdefault(str(digest), [0, 0])
+            if total:
+                entry[1] = max(entry[1], int(total))
+            if completed is not None:
+                entry[0] = max(entry[0], int(completed))
+
+        total_all = sum(size for _done, size in self.layers.values())
+        done_all = sum(min(done, size) for done, size in self.layers.values())
+
+        if total_all:
+            if not self.samples or done_all != self.samples[-1][1]:
+                self.samples.append((now, done_all))
+            while (
+                len(self.samples) > 1
+                and now - self.samples[0][0] > self.WINDOW_SECONDS
+            ):
+                self.samples.popleft()
+
+        speed = 0.0
+        if len(self.samples) >= 2:
+            first_ts, first_done = self.samples[0]
+            last_ts, last_done = self.samples[-1]
+            span = last_ts - first_ts
+            if span >= 0.5:
+                speed = max(0.0, (last_done - first_done) / span)
+
+        fraction = (done_all / total_all) if total_all else None
+        remaining = max(0, total_all - done_all) if total_all else None
+        eta = (remaining / speed) if (remaining is not None and speed > 0) else None
+        return {
+            "completed": done_all or None,
+            "total": total_all or None,
+            "fraction": fraction,
+            "speed": speed,
+            "remaining": remaining,
+            "eta": eta,
+        }
 
 
 def _ps_quote(value):
@@ -472,6 +566,11 @@ class TranslatorLauncher(ctk.CTk):
             self.download_card, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
         )
         self.dl_percent.pack(anchor="w", padx=20)
+
+        self.dl_eta = ctk.CTkLabel(
+            self.download_card, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
+        )
+        self.dl_eta.pack(anchor="w", padx=20)
 
         self.dl_log = ctk.CTkTextbox(
             self.download_card, height=84, fg_color=BG, border_width=1,
@@ -1113,6 +1212,7 @@ class TranslatorLauncher(ctk.CTk):
     def _show_download_card(self, model):
         self.dl_status.configure(text=f"Скачиваю модель {model}...", text_color=TEXT)
         self.dl_percent.configure(text="0%")
+        self.dl_eta.configure(text="")
         self.dl_progress.configure(mode="determinate")
         self.dl_progress.set(0)
         self.dl_cancel_btn.configure(state="normal")
@@ -1139,6 +1239,41 @@ class TranslatorLauncher(ctk.CTk):
             self.dl_log.insert("end", f"{time.strftime('%H:%M:%S')}  {line}\n")
             self.dl_log.see("end")
             self.dl_log.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _dl_tracker_update(self, info, status=None):
+        """Обновляет карточку прогресса из DownloadTracker (общий прогресс + ETA)."""
+        try:
+            if status:
+                self.dl_status.configure(text=status)
+            fraction = info.get("fraction")
+            if fraction is None:
+                if str(self.dl_progress.cget("mode")) != "indeterminate":
+                    self.dl_progress.configure(mode="indeterminate")
+                    self.dl_progress.start()
+                self.dl_percent.configure(text="…")
+                self.dl_eta.configure(text="")
+                return
+
+            fraction = max(0.0, min(1.0, float(fraction)))
+            self.dl_progress.configure(mode="determinate")
+            self.dl_progress.set(fraction)
+
+            parts = [
+                f"{format_bytes(info.get('completed'))} / {format_bytes(info.get('total'))}",
+                f"{fraction * 100:.0f}%",
+            ]
+            if info.get("speed"):
+                parts.append(format_speed(info["speed"]))
+            self.dl_percent.configure(text="   ·   ".join(parts))
+
+            extra = []
+            if info.get("remaining") is not None:
+                extra.append(f"осталось {format_bytes(info['remaining'])}")
+            if info.get("eta") is not None:
+                extra.append(format_duration(info["eta"]))
+            self.dl_eta.configure(text="   ·   ".join(extra) if extra else "")
         except Exception:
             pass
 
@@ -1198,9 +1333,11 @@ class TranslatorLauncher(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _download_via_api(self, model):
-        """Потоковая загрузка через Ollama API: прогресс, объём, стадии."""
+        """Потоковая загрузка через Ollama API: прогресс, объём, скорость, ETA."""
         payload = {"model": model, "name": model, "stream": True}
+        tracker = DownloadTracker()
         last_status = None
+        last_emit = 0.0
         with requests.post(
             f"{OLLAMA_HOST}/api/pull", json=payload, stream=True, timeout=(5, 60)
         ) as response:
@@ -1222,12 +1359,22 @@ class TranslatorLauncher(ctk.CTk):
                     raise RuntimeError(str(event["error"]))
 
                 status = str(event.get("status") or "")
-                total = event.get("total")
-                completed = event.get("completed")
+                digest = str(event.get("digest") or "")
+                info = tracker.update(
+                    digest=digest,
+                    completed=event.get("completed"),
+                    total=event.get("total"),
+                )
                 if status and status != last_status:
                     last_status = status
                     self._ui_call(self._dl_log, status)
-                self._ui_call(self._dl_progress_update, status or None, completed, total)
+
+                # Обновляем полоску не чаще 5 раз в секунду, иначе очередь
+                # UI-колбэков забивается тысячами событий Ollama.
+                now = time.monotonic()
+                if now - last_emit >= 0.2:
+                    last_emit = now
+                    self._ui_call(self._dl_tracker_update, info, status or None)
 
         self._ui_call(self._dl_log, "Загрузка завершена.")
         self._ui_call(self._finish_download, True, "")
@@ -1302,6 +1449,7 @@ class TranslatorLauncher(ctk.CTk):
         if ok:
             self.dl_progress.set(1.0)
             self.dl_percent.configure(text="100% · готово")
+            self.dl_eta.configure(text="")
             self.dl_status.configure(text=f"Модель {model} скачана.", text_color=SUCCESS)
             self.dl_hint.configure(text="Теперь можно нажать «Запустить переводчик».")
             self._dl_log("Готово.")
@@ -1309,6 +1457,7 @@ class TranslatorLauncher(ctk.CTk):
                 f"Модель {model} готова. Нажми «Запустить переводчик».", kind="ok"
             )
         else:
+            self.dl_eta.configure(text="")
             self.dl_status.configure(
                 text=message or "Загрузка не удалась.", text_color=ERROR
             )

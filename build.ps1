@@ -1,5 +1,5 @@
 ﻿# build.ps1
-# Сборка «Гаджет Будущего» v1.5.0 (Lightweight) в .exe (--onedir).
+# Сборка «Гаджет Будущего» v1.5.1 (Lightweight) в .exe (--onedir).
 #
 # Запускается через build.bat (ASCII-обёртка). Логика внутри PowerShell, а не
 # cmd, по важной причине: cmd.exe разбирает .bat в текущей кодовой странице
@@ -37,7 +37,7 @@ try {
 }
 
 $AppName = "GadgetOfTheFuture"
-$Version = "v1.5.0"
+$Version = "v1.5.1"
 $SizeLimitMb = 100
 
 function Stop-WithError([string]$Message) {
@@ -114,6 +114,33 @@ try { Wait-Process -Name $AppName -Timeout 10 -ErrorAction SilentlyContinue } ca
 
 # Удаляем только то, что создаёт эта сборка. Раньше здесь сносился весь dist\,
 # то есть вместе с прошлыми релизными архивами.
+#
+# Перед удалением сохраняем пользовательские данные portable-сборки: в
+# dist\GadgetOfTheFuture\data лежат settings.json (с API-ключом), память,
+# глоссарий и кэш. Без этого каждая пересборка стирала настройки тестировщика.
+$PortableDataNames = @(
+    "settings.json", "memory.json", "characters.json", "glossary.json", "web_cache.json"
+)
+$PortableBackup = Join-Path $env:TEMP "gadgetofuture_portable_backup"
+$SavedPortable = @()
+$portableDataDir = Join-Path $DistDir "data"
+if (Test-Path -LiteralPath $portableDataDir) {
+    if (Test-Path -LiteralPath $PortableBackup) {
+        Remove-Item -LiteralPath $PortableBackup -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $PortableBackup -Force | Out-Null
+    foreach ($fileName in $PortableDataNames) {
+        $source = Join-Path $portableDataDir $fileName
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $PortableBackup $fileName) -Force -ErrorAction SilentlyContinue
+            $SavedPortable += $fileName
+        }
+    }
+    if ($SavedPortable.Count) {
+        Write-Ok ("Сохранил данные portable-сборки: " + ($SavedPortable -join ", "))
+    }
+}
+
 foreach ($path in @((Join-Path $Root "build"), $DistDir)) {
     if (Test-Path -LiteralPath $path) {
         $removed = $false
@@ -273,6 +300,20 @@ try {
     Write-Warning "Не удалось посчитать SHA256: $($_.Exception.Message)"
 }
 
+# --- Возвращаем данные portable-сборки ---------------------------------------
+# ВАЖНО: только ПОСЛЕ упаковки ZIP. Иначе settings.json с API-ключом попал бы в
+# релизный архив.
+if ($SavedPortable.Count -and (Test-Path -LiteralPath $PortableBackup)) {
+    foreach ($fileName in $SavedPortable) {
+        $source = Join-Path $PortableBackup $fileName
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $dataDir $fileName) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Ok ("Вернул данные тестировщика в dist\...\data: " + ($SavedPortable -join ", "))
+    Remove-Item -LiteralPath $PortableBackup -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- Итоги -------------------------------------------------------------------
 $folderBytes = (Get-ChildItem -LiteralPath $DistDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
 $folderMb = [math]::Round($folderBytes / 1MB, 1)
@@ -309,7 +350,7 @@ Write-Host ""
 Write-Host " Дальнейшие шаги:" -ForegroundColor Gray
 Write-Host "   1. Проверь, что переводчик запускается БЕЗ прав администратора."
 Write-Host "   2. Убедись, что ZIP меньше $SizeLimitMb МБ и оверлей работает."
-Write-Host "   3. Залей ZIP и .sha256 в GitHub Release (см. docs\release-notes-1.5.0.md)."
+Write-Host "   3. Публиковать не нужно: это локальные багфиксы 1.5.1."
 Write-Host "============================================================" -ForegroundColor DarkGray
 
 if ($Host.Name -eq "ConsoleHost" -and [Environment]::UserInteractive) {

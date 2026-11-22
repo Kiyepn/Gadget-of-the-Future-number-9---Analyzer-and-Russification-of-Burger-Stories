@@ -60,6 +60,62 @@ class FormatBytesTests(unittest.TestCase):
         self.assertEqual(launcher.format_bytes("abc"), "?")
         self.assertEqual(launcher.format_bytes(None), "?")
 
+    def test_speed_units(self):
+        self.assertEqual(launcher.format_speed(0), "0 КБ/с")
+        self.assertEqual(launcher.format_speed(1024 ** 2 * 12.34), "12.3 МБ/с")
+        self.assertEqual(launcher.format_speed(800 * 1024), "800 КБ/с")
+
+    def test_duration_units(self):
+        self.assertEqual(launcher.format_duration(0.3), "меньше секунды")
+        self.assertEqual(launcher.format_duration(15), "~15 с")
+        self.assertEqual(launcher.format_duration(125), "~2 мин 05 с")
+        self.assertEqual(launcher.format_duration(3900), "~1 ч 05 мин")
+
+
+class DownloadTrackerTests(unittest.TestCase):
+    """Агрегация прогресса по слоям Ollama: процент, скорость, ETA."""
+
+    def test_single_layer_progress(self):
+        tracker = launcher.DownloadTracker()
+        info = tracker.update(digest="a", completed=50, total=100, now=0.0)
+        self.assertEqual(info["fraction"], 0.5)
+        self.assertEqual(info["completed"], 50)
+        self.assertEqual(info["total"], 100)
+        self.assertIsNone(info["eta"])  # без истории скорость ещё неизвестна
+
+    def test_multiple_layers_are_summed(self):
+        tracker = launcher.DownloadTracker()
+        tracker.update(digest="a", completed=100, total=100, now=0.0)
+        info = tracker.update(digest="b", completed=0, total=300, now=1.0)
+        self.assertEqual(info["total"], 400)
+        self.assertEqual(info["completed"], 100)
+        self.assertAlmostEqual(info["fraction"], 0.25)
+
+    def test_speed_and_eta_after_steady_progress(self):
+        tracker = launcher.DownloadTracker()
+        # 10 МБ/с: за 5 секунд прошли 50 МБ из 100 МБ
+        for second in range(6):
+            info = tracker.update(
+                digest="a", completed=second * 10 * 1024 ** 2,
+                total=100 * 1024 ** 2, now=float(second),
+            )
+        self.assertAlmostEqual(info["fraction"], 0.5, places=3)
+        self.assertAlmostEqual(info["speed"] / (1024 ** 2), 10.0, places=1)
+        self.assertAlmostEqual(info["eta"], 5.0, places=1)
+
+    def test_no_total_means_indeterminate(self):
+        tracker = launcher.DownloadTracker()
+        info = tracker.update(digest=None, completed=None, total=None, now=0.0)
+        self.assertIsNone(info["fraction"])
+        self.assertIsNone(info["eta"])
+
+    def test_eta_absent_when_speed_zero(self):
+        tracker = launcher.DownloadTracker()
+        tracker.update(digest="a", completed=0, total=100, now=0.0)
+        info = tracker.update(digest="a", completed=0, total=100, now=3.0)
+        self.assertEqual(info["speed"], 0.0)
+        self.assertIsNone(info["eta"])
+
 
 class DesktopTests(unittest.TestCase):
     def test_desktop_dir_exists(self):
