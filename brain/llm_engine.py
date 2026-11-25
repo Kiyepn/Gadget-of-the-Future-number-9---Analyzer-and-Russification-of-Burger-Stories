@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import re
+from brain.paths import config_path as app_config_path
 from brain.paths import data_file, ensure_data_dir, load_config
 from brain.memory_engine import format_memory_for_prompt, save_memory, format_characters_for_prompt, save_character, load_characters
 from brain import web_search
@@ -210,6 +211,11 @@ def ask_deepseek(text, api_key=None, model=None):
                 err = data.get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else str(err)
                 log.error(f"[Ошибка DeepSeek] HTTP {response.status_code}: {msg}")
+                if response.status_code == 429:
+                    return (
+                        "[Ошибка DeepSeek: превышен лимит запросов (429). "
+                        "Подожди немного и повтори.]"
+                    )
                 return f"[Ошибка DeepSeek: {msg}]"
 
             result = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
@@ -247,6 +253,91 @@ def translate(text):
 # что выбрана для перевода.
 
 _LEGACY_ANALYZE_WARNED = False
+_LEGACY_CONFIG_RE = re.compile(r"^[ \t]*ANALYZE_MODEL_NAME[ \t]*=.*(?:\r?\n)?", re.MULTILINE)
+
+# Защита от повторного анализа одного и того же персонажа:
+# * _LORE_INFLIGHT — имя уже в работе (два кадра подряд до записи в characters.json);
+# * _LORE_LAST_ATTEMPT — недавняя неудачная попытка (чтобы не дёргать модель
+#   каждый кадр, если лор так и не нашёлся).
+_LORE_INFLIGHT = set()
+_LORE_LAST_ATTEMPT = {}
+_LORE_LOCK = threading.Lock()
+_LORE_RETRY_SECONDS = 600.0
+
+
+def _migrate_legacy_config(path=None):
+    """Убирает устаревшую ANALYZE_MODEL_NAME из config.py рядом с приложением.
+
+    Нужно тем, кто обновил программу, но оставил старый config.py: иначе
+    предупреждение «константа больше не используется» появлялось бы в журнале
+    при каждом запуске. Удаляем только строку с этой константой, с бэкапом и
+    проверкой компиляции: при любой проблеме файл не трогаем.
+
+    Возвращает True, если файл действительно поправлен.
+    """
+    path = path or app_config_path()
+    try:
+        if not path or not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as stream:
+            original = stream.read()
+        if "ANALYZE_MODEL_NAME" not in original:
+            return False
+
+        updated = _LEGACY_CONFIG_RE.sub("", original)
+        if updated == original:
+            return False
+
+        compile(updated, path, "exec")  # проверка, что config.py остался валидным
+
+        backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+        with open(backup, "w", encoding="utf-8") as stream:
+            stream.write(original)
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(updated)
+    except Exception as exc:
+        log.warning(
+            "[Лор] Не удалось убрать устаревшую ANALYZE_MODEL_NAME из config.py: %s. "
+            "Её можно удалить вручную — она больше не используется.",
+            exc,
+        )
+        return False
+
+    log.info(
+        "[Лор] Убрал устаревшую константу ANALYZE_MODEL_NAME из config.py "
+        "(бэкап: %s). Лор считает модель, выбранная для перевода.",
+        os.path.basename(backup),
+    )
+    return True
+
+
+def _lore_should_skip(name):
+    """True, если персонажа уже анализируют или анализировали только что."""
+    now = time.monotonic()
+    with _LORE_LOCK:
+        if name in _LORE_INFLIGHT:
+            log.debug("[Лор] «%s» уже анализируется — новый запрос не нужен.", name)
+            return True
+        last = _LORE_LAST_ATTEMPT.get(name)
+        if last is not None and (now - last) < _LORE_RETRY_SECONDS:
+            log.debug(
+                "[Лор] «%s» проверяли %.0f с назад — повторю позже.",
+                name,
+                now - last,
+            )
+            return True
+    return False
+
+
+def _lore_mark_inflight(name):
+    with _LORE_LOCK:
+        _LORE_INFLIGHT.add(name)
+
+
+def _lore_release(name):
+    with _LORE_LOCK:
+        _LORE_INFLIGHT.discard(name)
+        _LORE_LAST_ATTEMPT[name] = time.monotonic()
 
 
 def _ollama_base_url():
@@ -279,14 +370,16 @@ def lore_model_config(settings=None):
     global _LEGACY_ANALYZE_WARNED
 
     if not _LEGACY_ANALYZE_WARNED:
-        legacy = getattr(config, "ANALYZE_MODEL_NAME", None)
-        if legacy:
-            _LEGACY_ANALYZE_WARNED = True
-            log.info(
-                "[Лор] config.ANALYZE_MODEL_NAME (%s) больше не используется: "
-                "лор считает модель, выбранная для перевода.",
-                legacy,
-            )
+        _LEGACY_ANALYZE_WARNED = True
+        # Сначала пробуем починить старый config.py, а не просто предупреждать.
+        if not _migrate_legacy_config():
+            legacy = getattr(config, "ANALYZE_MODEL_NAME", None)
+            if legacy:
+                log.info(
+                    "[Лор] config.ANALYZE_MODEL_NAME (%s) больше не используется: "
+                    "лор считает модель, выбранная для перевода.",
+                    legacy,
+                )
 
     settings = settings or load_settings()
     provider = str(settings.get("provider") or "ollama").strip().lower()
@@ -362,8 +455,22 @@ def _lore_completion(prompt, model_config, timeout=60):
             "Content-Type": "application/json",
         }
         try:
+            started = time.monotonic()
             response = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
             data = response.json()
+            elapsed = time.monotonic() - started
+            if response.status_code == 429:
+                retry_after = ""
+                try:
+                    retry_after = str(response.headers.get("Retry-After") or "")
+                except Exception:
+                    retry_after = ""
+                log.warning(
+                    "[Лор] DeepSeek: превышен лимит запросов (429 Too Many Requests)%s "
+                    "— лор не сохранён, попробую позже.",
+                    f", сервер просит подождать {retry_after} с" if retry_after else "",
+                )
+                return None
             if response.status_code != 200:
                 err = (data.get("error") or {}) if isinstance(data, dict) else {}
                 message = err.get("message") if isinstance(err, dict) else str(err)
@@ -371,6 +478,7 @@ def _lore_completion(prompt, model_config, timeout=60):
                 return None
             choices = data.get("choices") or [{}]
             content = (choices[0].get("message") or {}).get("content", "")
+            log.info("[Лор] Модель %s ответила за %.2f с.", model, elapsed)
             return content or None
         except Exception as exc:
             log.warning("[Лор] DeepSeek недоступен: %s", exc)
@@ -382,6 +490,7 @@ def _lore_completion(prompt, model_config, timeout=60):
         return None
 
     try:
+        started = time.monotonic()
         response = requests.post(
             config.OLLAMA_URL,
             json={
@@ -392,10 +501,12 @@ def _lore_completion(prompt, model_config, timeout=60):
             },
             timeout=timeout,
         )
+        elapsed = time.monotonic() - started
         data = response.json() or {}
         if data.get("error"):
             log.warning("[Лор] Ollama вернула ошибку: %s", data["error"])
             return None
+        log.info("[Лор] Модель %s ответила за %.2f с.", model, elapsed)
         return data.get("response") or None
     except Exception as exc:
         log.warning("[Лор] Ollama недоступна: %s", exc)
@@ -427,6 +538,9 @@ def _parse_lore_json(raw, expected_name=""):
         "description",
         "описание персонажа",
     }
+    # qwen2.5:3b иногда подмешивает китайские/японские символы в русский ответ —
+    # такое описание лучше не сохранять, чем потом показывать в лоре.
+    cjk = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
     result = {}
     for char_name, desc in data.items():
@@ -438,6 +552,9 @@ def _parse_lore_json(raw, expected_name=""):
             continue
         if desc.lower() in placeholders or len(desc) < 6:
             log.info("[Лор] Ответ модели похож на заглушку (%r) — пропускаю.", desc[:40])
+            continue
+        if cjk.search(desc):
+            log.info("[Лор] В описании китайские/японские символы — пропускаю (%r).", desc[:40])
             continue
         result[char_name] = desc
     return result
@@ -456,38 +573,57 @@ Line: "{text}"'''
 
 def background_analyze(name, text, model_config=None):
     """Ищет лор в DuckDuckGo; при неудаче — спрашивает модель перевода."""
+    started = time.monotonic()
     config_used = dict(model_config or lore_model_config())
 
     try:
-        lore = web_search.fetch_character_lore(name, timeout=config.SEARCH_TIMEOUT)
-    except Exception as exc:
-        log.warning("[Лор] Ошибка веб-поиска: %s", exc)
-        lore = ""
+        try:
+            lore = web_search.fetch_character_lore(name, timeout=config.SEARCH_TIMEOUT)
+        except Exception as exc:
+            log.warning("[Лор] Ошибка веб-поиска: %s", exc)
+            lore = ""
+        search_elapsed = time.monotonic() - started
 
-    if lore:
-        save_character(name, lore)
-        log.info("[Лор] Записан: %s — %s", name, lore)
-        return
+        if lore:
+            save_character(name, lore)
+            log.info(
+                "[Лор] Записан: %s — %s (DuckDuckGo, %.2f с)",
+                name,
+                lore,
+                search_elapsed,
+            )
+            return
 
-    log.info(
-        "[Лор] DuckDuckGo не нашёл %s. Фоллбэк на %s (провайдер: %s).",
-        name,
-        config_used.get("model"),
-        config_used.get("provider"),
-    )
-    raw = _lore_completion(_build_lore_prompt(name, text), config_used)
-    parsed = _parse_lore_json(raw, expected_name=name)
-    if not parsed:
         log.info(
-            "[Лор] Модель %s не дала описания для «%s» — пропускаю.",
-            config_used.get("model"),
+            "[Лор] DuckDuckGo не нашёл %s за %.2f с. Фоллбэк на %s (провайдер: %s).",
             name,
+            search_elapsed,
+            config_used.get("model"),
+            config_used.get("provider"),
         )
-        return
+        raw = _lore_completion(_build_lore_prompt(name, text), config_used)
+        total_elapsed = time.monotonic() - started
+        parsed = _parse_lore_json(raw, expected_name=name)
+        if not parsed:
+            log.info(
+                "[Лор] Модель %s не дала описания для «%s» — пропускаю (всего %.2f с).",
+                config_used.get("model"),
+                name,
+                total_elapsed,
+            )
+            return
 
-    for char_name, desc in parsed.items():
-        save_character(char_name, desc)
-        log.info("[Лор] Записан: %s — %s", char_name, desc)
+        for char_name, desc in parsed.items():
+            save_character(char_name, desc)
+            log.info(
+                "[Лор] Записан: %s — %s (модель %s, всего %.2f с)",
+                char_name,
+                desc,
+                config_used.get("model"),
+                total_elapsed,
+            )
+    finally:
+        _lore_release(name)
 
 
 def analyze_character(text, settings=None):
@@ -519,6 +655,10 @@ def analyze_character(text, settings=None):
             if len(name) > 20 or name.lower() in ["surprisingly", "suddenly", "however"]:
                 return
 
+            # Не анализируем повторно: имя уже в работе или проверяли недавно.
+            if _lore_should_skip(name):
+                return
+
             # Модель для лора = модель перевода (см. lore_model_config).
             try:
                 model_config = lore_model_config(settings)
@@ -531,7 +671,12 @@ def analyze_character(text, settings=None):
                 name,
                 (model_config or {}).get("model", "неизвестно"),
             )
-            thread = threading.Thread(
-                target=background_analyze, args=(name, text, model_config), daemon=True
-            )
-            thread.start()
+            _lore_mark_inflight(name)
+            try:
+                thread = threading.Thread(
+                    target=background_analyze, args=(name, text, model_config), daemon=True
+                )
+                thread.start()
+            except Exception:
+                _lore_release(name)
+                raise

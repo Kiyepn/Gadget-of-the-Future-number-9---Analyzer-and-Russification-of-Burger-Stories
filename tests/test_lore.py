@@ -11,6 +11,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -20,13 +21,20 @@ import brain.llm_engine as llm  # noqa: E402
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self._payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
         self.text = json.dumps(payload, ensure_ascii=False)
 
     def json(self):
         return self._payload
+
+
+def _clear_lore_state():
+    with llm._LORE_LOCK:
+        llm._LORE_INFLIGHT.clear()
+        llm._LORE_LAST_ATTEMPT.clear()
 
 
 class LoreModelConfigTests(unittest.TestCase):
@@ -92,6 +100,11 @@ class ParseLoreJsonTests(unittest.TestCase):
             llm._parse_lore_json(raw),
             {"Kaelor": "Говорит спокойно и уверенно, как лидер."},
         )
+
+    def test_cjk_garbage_rejected(self):
+        # qwen2.5:3b иногда смешивает китайские иероглифы с русским текстом.
+        raw = '{"Kaelor": "Это вы听起来像是一个需要迅速行动的角色。"}'
+        self.assertEqual(llm._parse_lore_json(raw), {})
 
 
 class OllamaModelReadyTests(unittest.TestCase):
@@ -182,6 +195,33 @@ class DeepSeekLoreCompletionTests(unittest.TestCase):
         with mock.patch.object(llm.requests, "post", return_value=fake):
             self.assertIsNone(llm._lore_completion("prompt", cfg))
 
+    def test_429_returns_none_with_clear_message(self):
+        cfg = {"provider": "deepseek", "model": "deepseek-chat", "api_key": "sk-test"}
+        fake = FakeResponse(
+            {"error": {"message": "Rate limit reached"}},
+            status_code=429,
+            headers={"Retry-After": "30"},
+        )
+        with mock.patch.object(llm.requests, "post", return_value=fake):
+            with self.assertLogs(llm.log, level="WARNING") as captured:
+                self.assertIsNone(llm._lore_completion("prompt", cfg))
+        text = "\n".join(captured.output)
+        self.assertIn("429", text)
+        self.assertIn("30", text)
+        self.assertIn("лимит", text)
+
+
+class DeepSeekTranslationErrorTests(unittest.TestCase):
+    def test_429_message_for_translation(self):
+        fake = FakeResponse({"error": {"message": "Rate limit reached"}}, status_code=429)
+        with mock.patch.object(llm.requests, "post", return_value=fake), \
+                mock.patch.object(
+                    llm, "_build_translation_prompt", return_value=("system", "user")
+                ):
+            result = llm.ask_deepseek("hi", api_key="sk-test")
+        self.assertIn("429", result)
+        self.assertIn("лимит", result)
+
 
 class BackgroundAnalyzeTests(unittest.TestCase):
     def setUp(self):
@@ -237,6 +277,12 @@ class BackgroundAnalyzeTests(unittest.TestCase):
 
 
 class AnalyzeCharacterTests(unittest.TestCase):
+    def setUp(self):
+        _clear_lore_state()
+
+    def tearDown(self):
+        _clear_lore_state()
+
     def _fake_thread(self, captured):
         class FakeThread:
             def __init__(self, target=None, args=(), daemon=None, **kwargs):
@@ -292,6 +338,134 @@ class AnalyzeCharacterTests(unittest.TestCase):
                 mock.patch.object(llm.threading, "Thread", self._fake_thread(captured)):
             llm.analyze_character("Me: I should go", {"provider": "ollama"})
         self.assertEqual(captured["args"][0], "Я")
+
+
+class LoreDeduplicationTests(unittest.TestCase):
+    """Один персонаж не должен анализироваться на каждый кадр."""
+
+    def setUp(self):
+        _clear_lore_state()
+
+    def tearDown(self):
+        _clear_lore_state()
+
+    def _fake_thread(self, started):
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=None, **kwargs):
+                self.args = args
+
+            def start(self):
+                started.append(self.args[0])
+
+        return FakeThread
+
+    def test_second_encounter_while_in_flight_is_ignored(self):
+        started = []
+        settings = {"provider": "ollama", "ollama_model": "qwen2.5:3b"}
+        with mock.patch.object(llm, "load_characters", return_value={}), \
+                mock.patch.object(llm.threading, "Thread", self._fake_thread(started)):
+            for _ in range(10):
+                llm.analyze_character("Alice: hello", settings)
+        self.assertEqual(started, ["Alice"])
+
+    def test_retry_allowed_after_ttl(self):
+        started = []
+        llm._LORE_LAST_ATTEMPT["Alice"] = time.monotonic() - llm._LORE_RETRY_SECONDS - 5
+        with mock.patch.object(llm, "load_characters", return_value={}), \
+                mock.patch.object(llm.threading, "Thread", self._fake_thread(started)):
+            llm.analyze_character("Alice: hello", {"provider": "ollama", "ollama_model": "qwen2.5:3b"})
+        self.assertEqual(started, ["Alice"])
+
+    def test_saved_character_not_analyzed_again(self):
+        started = []
+        with mock.patch.object(llm, "load_characters", return_value={"Alice": "уже есть"}), \
+                mock.patch.object(llm.threading, "Thread", self._fake_thread(started)):
+            llm.analyze_character("Alice: hello", {"provider": "ollama", "ollama_model": "qwen2.5:3b"})
+        self.assertEqual(started, [])
+
+    def test_background_analyze_releases_in_flight(self):
+        llm._LORE_INFLIGHT.add("Alice")
+        with mock.patch.object(llm.web_search, "fetch_character_lore", return_value=""), \
+                mock.patch.object(llm, "_lore_completion", return_value=None), \
+                mock.patch.object(llm, "save_character"):
+            llm.background_analyze("Alice", "Alice: hi", {"provider": "ollama", "model": "x"})
+        self.assertNotIn("Alice", llm._LORE_INFLIGHT)
+        self.assertIn("Alice", llm._LORE_LAST_ATTEMPT)
+
+
+class LegacyConfigMigrationTests(unittest.TestCase):
+    """Старый config.py чистится сам, а не просто предупреждает каждый запуск."""
+
+    def _write_config(self, tmp, text):
+        path = os.path.join(tmp, "config.py")
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        return path
+
+    def test_removes_constant_and_creates_backup(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original = (
+                'MODEL_NAME = "translategemma:4b"\n'
+                'ANALYZE_MODEL_NAME = "gemma2:9b"\n'
+                "ENABLE_WEB_SEARCH = True\n"
+            )
+            path = self._write_config(tmp, original)
+
+            self.assertTrue(llm._migrate_legacy_config(path))
+
+            with open(path, encoding="utf-8") as stream:
+                updated = stream.read()
+            self.assertNotIn("ANALYZE_MODEL_NAME", updated)
+            self.assertIn("ENABLE_WEB_SEARCH = True", updated)
+            self.assertIn("MODEL_NAME", updated)
+
+            backups = [name for name in os.listdir(tmp) if name.startswith("config.py.bak-")]
+            self.assertEqual(len(backups), 1)
+            with open(os.path.join(tmp, backups[0]), encoding="utf-8") as stream:
+                self.assertIn("ANALYZE_MODEL_NAME", stream.read())
+
+    def test_no_legacy_constant_is_noop(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_config(tmp, 'MODEL_NAME = "x"\n')
+            self.assertFalse(llm._migrate_legacy_config(path))
+            self.assertEqual(len(os.listdir(tmp)), 1)  # бэкап не создаётся
+
+    def test_missing_file_is_noop(self):
+        self.assertFalse(llm._migrate_legacy_config(os.path.join("no", "such", "config.py")))
+
+    def test_invalid_python_is_not_written(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # После удаления строки останется битый Python — файл трогать нельзя.
+            path = self._write_config(tmp, 'ANALYZE_MODEL_NAME = "gemma2:9b"\nif True:\n')
+            with open(path, encoding="utf-8") as stream:
+                before = stream.read()
+
+            self.assertFalse(llm._migrate_legacy_config(path))
+
+            with open(path, encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), before)
+
+
+class LoreTimingLogTests(unittest.TestCase):
+    def test_logs_model_and_elapsed_time(self):
+        with mock.patch.object(llm.web_search, "fetch_character_lore", return_value=""), \
+                mock.patch.object(
+                    llm, "_lore_completion", return_value='{"Alice": "Спокойная и уверенная."}'
+                ), mock.patch.object(llm, "save_character"), \
+                self.assertLogs(llm.log, level="INFO") as captured:
+            llm.background_analyze(
+                "Alice", "Alice: hi", {"provider": "ollama", "model": "qwen2.5:3b"}
+            )
+        text = "\n".join(captured.output)
+        self.assertIn("qwen2.5:3b", text)
+        self.assertIn("всего", text)
+        self.assertIn("с)", text)
 
 
 if __name__ == "__main__":
