@@ -1040,7 +1040,7 @@ class TranslatorLauncher(ctk.CTk):
             self.hint.configure(
                 text="DeepSeek работает через облачный API. Вставь свой API-ключ "
                      "(https://platform.deepseek.com). Ключ хранится зашифрованным "
-                     "через Windows DPAPI."
+                     "через Windows DPAPI. Лор персонажей пойдёт через эту же модель."
             )
         else:
             self.ollama_label.grid()
@@ -1049,7 +1049,8 @@ class TranslatorLauncher(ctk.CTk):
             self.api_show.configure(state="disabled")
             self.hint.configure(
                 text="Ollama работает локально и не требует ключа. Убедись, что "
-                     "сервис Ollama запущен (порт 11434)."
+                     "сервис Ollama запущен (порт 11434). Лор персонажей считает "
+                     "эта же модель."
             )
 
         # Баннер про Ollama: показать/скрыть и при необходимости проверить заново.

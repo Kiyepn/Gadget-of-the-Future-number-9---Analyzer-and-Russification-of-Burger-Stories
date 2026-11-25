@@ -240,58 +240,270 @@ def translate(text):
     return ask_ollama(text, model=settings.get("ollama_model") or None)
 
 
-def background_analyze(name, text):
-    """Ищет лор персонажа в DuckDuckGo; при неудаче — фоллбэк на локальную модель."""
+# ============ лор персонажей ============
+# Раньше фоллбэк лора жёстко считался на gemma2:9b (config.ANALYZE_MODEL_NAME).
+# Из-за этого требовалась модель, которой нет в лаунчере, а в режиме DeepSeek
+# запрос всё равно уходил в локальную Ollama. Теперь лор считает та же модель,
+# что выбрана для перевода.
+
+_LEGACY_ANALYZE_WARNED = False
+
+
+def _ollama_base_url():
+    """База Ollama из config.OLLAMA_URL (…/api/generate -> http://host:port)."""
+    url = (getattr(config, "OLLAMA_URL", "") or "http://localhost:11434/api/generate")
+    return url.split("/api/")[0].rstrip("/")
+
+
+def _normalize_model_name(name):
+    """«qwen2.5» -> («qwen2.5», «latest»); нужно для сравнения тегов Ollama."""
+    raw = (name or "").strip().lower()
+    if not raw:
+        return "", ""
+    if ":" in raw:
+        base, tag = raw.rsplit(":", 1)
+        return base, (tag or "latest")
+    return raw, "latest"
+
+
+def _same_model(left, right):
+    return _normalize_model_name(left) == _normalize_model_name(right)
+
+
+def lore_model_config(settings=None):
+    """Модель и провайдер для лора = те же, что выбраны для перевода.
+
+    Возвращает словарь {"provider", "model", "api_key"}. Ключ нужен только
+    для DeepSeek.
+    """
+    global _LEGACY_ANALYZE_WARNED
+
+    if not _LEGACY_ANALYZE_WARNED:
+        legacy = getattr(config, "ANALYZE_MODEL_NAME", None)
+        if legacy:
+            _LEGACY_ANALYZE_WARNED = True
+            log.info(
+                "[Лор] config.ANALYZE_MODEL_NAME (%s) больше не используется: "
+                "лор считает модель, выбранная для перевода.",
+                legacy,
+            )
+
+    settings = settings or load_settings()
+    provider = str(settings.get("provider") or "ollama").strip().lower()
+    if provider == "deepseek":
+        model = str(settings.get("deepseek_model") or "").strip() or "deepseek-chat"
+    else:
+        provider = "ollama"
+        model = str(settings.get("ollama_model") or "").strip() or config.MODEL_NAME
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": str(settings.get("api_key") or "").strip(),
+    }
+
+
+def _ollama_model_ready(model, timeout=2.5):
+    """Проверяет, что Ollama запущена и нужная модель скачана.
+
+    Возвращает (True, "") или (False, причина) — чтобы в журнале была понятная
+    причина, а не голый таймаут.
+    """
+    try:
+        response = requests.get(f"{_ollama_base_url()}/api/tags", timeout=timeout)
+        if response.status_code != 200:
+            return False, f"Ollama ответила HTTP {response.status_code}"
+        payload = response.json() or {}
+        names = [
+            str(item.get("name") or item.get("model") or "")
+            for item in (payload.get("models") or [])
+        ]
+    except Exception as exc:
+        return False, f"Ollama недоступна ({exc})"
+
+    if not any(_same_model(name, model) for name in names):
+        # Модель может быть не скачана — это не ошибка сети, но лор не получится.
+        return False, f"модель «{model}» не найдена в Ollama (скачайте её в лаунчере)"
+    return True, ""
+
+
+def _lore_completion(prompt, model_config, timeout=60):
+    """Запрос к выбранной модели. Возвращает текст ответа или None.
+
+    None означает «провайдер недоступен/не настроен» — в этом случае лор
+    остаётся пустым, а приложение продолжает работать.
+    """
+    provider = (model_config or {}).get("provider") or "ollama"
+    model = (model_config or {}).get("model") or config.MODEL_NAME
+
+    if provider == "deepseek":
+        api_key = (model_config or {}).get("api_key") or ""
+        if not api_key:
+            log.warning("[Лор] Выбран DeepSeek, но API-ключ не задан — лор не будет сохранён.")
+            return None
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты описываешь персонажей визуальных новелл. "
+                        "Отвечай только валидным JSON-объектом на русском языке."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 120,
+            "stream": False,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
+            data = response.json()
+            if response.status_code != 200:
+                err = (data.get("error") or {}) if isinstance(data, dict) else {}
+                message = err.get("message") if isinstance(err, dict) else str(err)
+                log.warning("[Лор] DeepSeek ответил HTTP %s: %s", response.status_code, message)
+                return None
+            choices = data.get("choices") or [{}]
+            content = (choices[0].get("message") or {}).get("content", "")
+            return content or None
+        except Exception as exc:
+            log.warning("[Лор] DeepSeek недоступен: %s", exc)
+            return None
+
+    ready, reason = _ollama_model_ready(model)
+    if not ready:
+        log.warning("[Лор] Локальная модель недоступна: %s — лор не будет сохранён.", reason)
+        return None
+
+    try:
+        response = requests.post(
+            config.OLLAMA_URL,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.1, "num_predict": 80},
+            },
+            timeout=timeout,
+        )
+        data = response.json() or {}
+        if data.get("error"):
+            log.warning("[Лор] Ollama вернула ошибку: %s", data["error"])
+            return None
+        return data.get("response") or None
+    except Exception as exc:
+        log.warning("[Лор] Ollama недоступна: %s", exc)
+        return None
+
+
+def _parse_lore_json(raw, expected_name=""):
+    """Достаёт {имя: описание} из ответа модели (учитывает ```json-обёртку)."""
+    if not raw:
+        return {}
+    cleaned = str(raw).replace("```json", "").replace("```", "").strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end <= start:
+        return {}
+    try:
+        data = json.loads(cleaned[start:end + 1])
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    # Модели любят вернуть сам шаблон из промпта вместо описания.
+    placeholders = {
+        "описание на русском",
+        "описание на русском.",
+        "короткое описание на русском.",
+        "краткое описание",
+        "описание",
+        "description",
+        "описание персонажа",
+    }
+
+    result = {}
+    for char_name, desc in data.items():
+        char_name = str(char_name).strip()
+        desc = str(desc).strip()
+        if not char_name or not desc:
+            continue
+        if desc in ("{}", "[]", "null", "None"):
+            continue
+        if desc.lower() in placeholders or len(desc) < 6:
+            log.info("[Лор] Ответ модели похож на заглушку (%r) — пропускаю.", desc[:40])
+            continue
+        result[char_name] = desc
+    return result
+
+
+def _build_lore_prompt(name, text):
+    # Формулировка проверена на qwen2.5:3b: мягкий вариант («если не персонаж —
+    # ответь {}») модель понимала слишком буквально и возвращала {} почти всегда,
+    # а вариант с примером иногда просто копировал пример. Этот даёт описание.
+    return f'''The line below is spoken by the character "{name}" in a visual novel.
+Based only on this line, write ONE short sentence in RUSSIAN describing their personality, tone or role.
+Reply with ONLY a JSON object, no explanations: {{"{name}": "описание на русском"}}
+Answer {{}} ONLY if "{name}" is clearly not a person (an object, a number, a UI button or a sound).
+Line: "{text}"'''
+
+
+def background_analyze(name, text, model_config=None):
+    """Ищет лор в DuckDuckGo; при неудаче — спрашивает модель перевода."""
+    config_used = dict(model_config or lore_model_config())
+
     try:
         lore = web_search.fetch_character_lore(name, timeout=config.SEARCH_TIMEOUT)
-    except Exception as e:
-        log.warning(f"[Лор] Ошибка веб-поиска: {e}")
+    except Exception as exc:
+        log.warning("[Лор] Ошибка веб-поиска: %s", exc)
         lore = ""
 
     if lore:
         save_character(name, lore)
-        log.info(f"[Лор] Записан: {name} — {lore}")
+        log.info("[Лор] Записан: %s — %s", name, lore)
         return
 
-    # Фоллбэк: локальная модель, строго 1 предложение.
-    log.info(f"[Лор] DuckDuckGo не нашёл {name}. Фоллбэк на локальную модель...")
-    prompt = f"""
-Analyze the following text from a visual novel. The character speaking is "{name}".
-Write EXACTLY ONE short sentence (in Russian) describing their personality, tone, or role.
-You MUST write the description strictly in RUSSIAN language. Do not use English.
-IMPORTANT: If the name is an object, animal, or background item (like cups, chairs, doors), output ONLY: {{}}
-Output ONLY a valid JSON object in the format: {{"{name}": "Описание на русском"}}
-If you cannot identify a specific character, output ONLY: {{}}
-Text: "{text}"
-"""
-    try:
-        response = requests.post(config.OLLAMA_URL, json={
-            "model": config.ANALYZE_MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 60}
-        }, timeout=60)
+    log.info(
+        "[Лор] DuckDuckGo не нашёл %s. Фоллбэк на %s (провайдер: %s).",
+        name,
+        config_used.get("model"),
+        config_used.get("provider"),
+    )
+    raw = _lore_completion(_build_lore_prompt(name, text), config_used)
+    parsed = _parse_lore_json(raw, expected_name=name)
+    if not parsed:
+        log.info(
+            "[Лор] Модель %s не дала описания для «%s» — пропускаю.",
+            config_used.get("model"),
+            name,
+        )
+        return
 
-        response_data = response.json()
-        if 'response' in response_data:
-            result = response_data['response'].replace("```json", "").replace("```", "").strip()
-            if result.startswith("{"):
-                data = json.loads(result)
-                for char_name, desc in data.items():
-                    save_character(char_name, desc)
-                    log.info(f"[Лор] В фоне записан: {char_name} — {desc}")
-    except Exception as e:
-        log.warning(f"[Лор] Ошибка фонового анализа: {e}")
+    for char_name, desc in parsed.items():
+        save_character(char_name, desc)
+        log.info("[Лор] Записан: %s — %s", char_name, desc)
 
-def analyze_character(text):
+
+def analyze_character(text, settings=None):
     """Ищет имена только с двоеточием или четко определяет внутренний голос"""
     import re
-    
+
     name = None
     text_lower = text.lower()
-    
-    # 1. Если текст начинается с "Me" или "I " - это внутренний голос
-    if text_lower.startswith("me ") or text_lower.startswith("i "):
+
+    # 1. Если текст начинается с "Me" или "I " - это внутренний голос.
+    #    "Me:" тоже внутренний голос: в промпте перевода он становится "Я:".
+    if (
+        text_lower.startswith("me ")
+        or text_lower.startswith("me:")
+        or text_lower.startswith("i ")
+    ):
         name = "Я"
     else:
         # 2. Ищем строго "Имя:" (только одно слово или два, но с двоеточием)
@@ -306,7 +518,20 @@ def analyze_character(text):
             # Защита от мусора
             if len(name) > 20 or name.lower() in ["surprisingly", "suddenly", "however"]:
                 return
-                
-            log.info(f"[Лор] Обнаружен новый персонаж: {name}. Ищу описание...")
-            thread = threading.Thread(target=background_analyze, args=(name, text), daemon=True)
+
+            # Модель для лора = модель перевода (см. lore_model_config).
+            try:
+                model_config = lore_model_config(settings)
+            except Exception as exc:
+                log.warning("[Лор] Не удалось определить модель для лора: %s", exc)
+                model_config = None
+
+            log.info(
+                "[Лор] Обнаружен новый персонаж: %s. Ищу описание (модель: %s)...",
+                name,
+                (model_config or {}).get("model", "неизвестно"),
+            )
+            thread = threading.Thread(
+                target=background_analyze, args=(name, text, model_config), daemon=True
+            )
             thread.start()

@@ -593,7 +593,18 @@ def _run_translator(args):
         backend = hotkeys.start()
         log.info("Горячие клавиши: %s", backend or "недоступны")
 
-        _capture_loop(ocr, translate, analyze_character, clear_memory)
+        # Настройки передаём в анализ лора: он должен считать той же моделью,
+        # что выбрана для перевода (Ollama или DeepSeek), а не отдельной.
+        # Перечитываем их на каждого нового персонажа — translate() делает так же,
+        # поэтому смена провайдера в лаунчере подхватывается без перезапуска.
+        def _analyze_character(text):
+            try:
+                current_settings = load_settings()
+            except Exception:
+                current_settings = settings
+            return analyze_character(text, current_settings)
+
+        _capture_loop(ocr, translate, _analyze_character, clear_memory)
     except KeyboardInterrupt:
         log.info("Остановка по Ctrl+C.")
     except SystemExit:
