@@ -1542,6 +1542,9 @@ class TranslatorLauncher(ctk.CTk):
         self._refresh_data_location()
         self._refresh_log()
         self._update_ollama_banner()
+        # Виджеты созданы заново со стоковыми состояниями: если переводчик уже
+        # работает, надо вернуть disabled/«Остановить» — иначе его не остановить.
+        self._sync_run_buttons()
         try:
             self.update_idletasks()
             self.body._parent_canvas.yview_moveto(0.0)
@@ -1739,8 +1742,7 @@ class TranslatorLauncher(ctk.CTk):
 
     def stop(self):
         self._terminate_process()
-        self.launch_btn.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
+        self._sync_run_buttons()
         self._set_status("Остановлено.", kind="ok")
 
     def _on_close(self):
@@ -1823,14 +1825,37 @@ class TranslatorLauncher(ctk.CTk):
         self.log_box.configure(state="disabled")
         self.log_box.see("end")
 
+    def _sync_run_buttons(self):
+        """Приводит кнопки в соответствие с реально запущенными процессами.
+
+        Нужно после пересборки окна (смена темы): новые виджеты создаются
+        активными, и раньше при работающем переводчике «Остановить» оказывалась
+        недоступной, а нажатие «Запустить» просто писало «уже запущен».
+        """
+        running = self.process is not None and self.process.poll() is None
+        testing = self._test_process is not None and self._test_process.poll() is None
+        try:
+            self.launch_btn.configure(state="disabled" if running else "normal")
+            self.stop_btn.configure(state="normal" if running else "disabled")
+        except Exception:
+            pass
+        try:
+            self.test_overlay_btn.configure(state="disabled" if testing else "normal")
+        except Exception:
+            pass
+        if running:
+            self._set_status(
+                "Переводчик уже запущен. Остановить можно кнопкой «Остановить».",
+                kind="ok",
+            )
+
     def _poll_state(self):
         """Обновляет журнал и следит за завершением процесса."""
         self._refresh_log()
         if self.process is not None and self.process.poll() is not None:
             code = self.process.returncode
             self.process = None
-            self.launch_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
+            self._sync_run_buttons()
             self._set_status(
                 f"Переводчик завершился (код {code}). Подробности — в журнале.",
                 kind="warn" if code else "info",

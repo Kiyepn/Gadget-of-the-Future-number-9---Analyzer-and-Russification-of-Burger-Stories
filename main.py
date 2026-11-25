@@ -34,6 +34,7 @@ from brain.ocr_providers import (
 )
 from brain.overlay import Overlay
 from brain.paths import data_location_hint, ensure_data_dir
+from brain.settings import load_settings
 from brain.version import APP_TITLE, __version__
 
 log = logging.getLogger(__name__)
@@ -516,7 +517,14 @@ def _run_overlay_test(seconds):
     _enable_dpi_awareness()
     setup_logging(logging.INFO)
     log.info("Тест оверлея v%s", __version__)
-    overlay = Overlay()
+    # Настройки нужны, чтобы тестовая карточка красилась текущей темой, а не
+    # всегдашним фиолетовым по умолчанию.
+    try:
+        settings = load_settings()
+    except Exception:
+        log.exception("Не удалось прочитать настройки — беру оформление по умолчанию")
+        settings = None
+    overlay = Overlay(settings)
     if not overlay.start():
         log.error("Не удалось запустить оверлей (нет GUI/Windows).")
         return 1

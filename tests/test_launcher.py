@@ -9,6 +9,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -157,6 +158,132 @@ class ThemeUnificationTests(unittest.TestCase):
 
         for name in ("crimson", "mono"):
             self.assertIn(name, ACCENTS)
+
+
+class FakeButton:
+    def __init__(self):
+        self.state = "normal"
+
+    def configure(self, **kwargs):
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+
+class FakeProcess:
+    def __init__(self, alive=True):
+        self._alive = alive
+
+    def poll(self):
+        return None if self._alive else 0
+
+
+class RunButtonsSyncTests(unittest.TestCase):
+    """После смены темы кнопки должны отражать реально запущенный переводчик."""
+
+    def _fake_launcher(self, running, testing=False):
+        stub = type("Stub", (), {})()
+        stub.process = FakeProcess(alive=running) if running else None
+        stub._test_process = FakeProcess(alive=True) if testing else None
+        stub.launch_btn = FakeButton()
+        stub.stop_btn = FakeButton()
+        stub.test_overlay_btn = FakeButton()
+        stub.status_text = None
+        stub._set_status = lambda text, kind="info": setattr(stub, "status_text", text)
+        return stub
+
+    def test_running_translator_enables_stop(self):
+        stub = self._fake_launcher(running=True)
+        launcher.TranslatorLauncher._sync_run_buttons(stub)
+        self.assertEqual(stub.launch_btn.state, "disabled")
+        self.assertEqual(stub.stop_btn.state, "normal")
+        self.assertIn("уже запущен", stub.status_text)
+
+    def test_stopped_translator_enables_launch(self):
+        stub = self._fake_launcher(running=False)
+        launcher.TranslatorLauncher._sync_run_buttons(stub)
+        self.assertEqual(stub.launch_btn.state, "normal")
+        self.assertEqual(stub.stop_btn.state, "disabled")
+        self.assertIsNone(stub.status_text)
+
+    def test_running_overlay_test_disables_button(self):
+        stub = self._fake_launcher(running=False, testing=True)
+        launcher.TranslatorLauncher._sync_run_buttons(stub)
+        self.assertEqual(stub.test_overlay_btn.state, "disabled")
+
+    def test_finished_process_counts_as_stopped(self):
+        stub = self._fake_launcher(running=True)
+        stub.process = FakeProcess(alive=False)
+        launcher.TranslatorLauncher._sync_run_buttons(stub)
+        self.assertEqual(stub.launch_btn.state, "normal")
+        self.assertEqual(stub.stop_btn.state, "disabled")
+
+
+class OverlayAccentTests(unittest.TestCase):
+    """Статусы оверлея красятся темой; красный остаётся только для ошибок."""
+
+    def _overlay(self, mode="status", kind="ok", accent="orange"):
+        from brain.overlay import Overlay
+
+        overlay = object.__new__(Overlay)
+        overlay._mode = mode
+        overlay._status_kind = kind
+        overlay._accent = accent
+        return overlay
+
+    def test_ok_status_uses_theme_accent(self):
+        from brain.overlay import ACCENTS
+
+        self.assertEqual(self._overlay(kind="ok", accent="orange")._accent_color(), ACCENTS["orange"])
+        self.assertEqual(self._overlay(kind="ok", accent="mono")._accent_color(), ACCENTS["mono"])
+
+    def test_error_status_stays_red(self):
+        from brain.overlay import STATUS_ERROR
+
+        self.assertEqual(self._overlay(kind="error")._accent_color(), STATUS_ERROR)
+
+    def test_translation_uses_theme_accent(self):
+        from brain.overlay import ACCENTS
+
+        self.assertEqual(
+            self._overlay(mode="translation", accent="green")._accent_color(),
+            ACCENTS["green"],
+        )
+
+
+class OverlayTestUsesSettingsTests(unittest.TestCase):
+    """Режим --overlay-test должен брать тему из настроек, а не violet."""
+
+    def test_overlay_test_passes_settings(self):
+        import main as main_module
+
+        captured = {}
+
+        class FakeOverlay:
+            def __init__(self, settings=None):
+                captured["settings"] = settings
+
+            def start(self):
+                return True
+
+            def show_translation(self, *args, **kwargs):
+                captured["shown"] = True
+
+            def stop(self):
+                captured["stopped"] = True
+
+        settings = {"overlay_accent": "orange", "launcher_theme": "orange"}
+        with mock.patch.object(main_module, "Overlay", FakeOverlay), \
+                mock.patch.object(main_module, "load_settings", return_value=settings), \
+                mock.patch.object(main_module, "_guard_std_streams"), \
+                mock.patch.object(main_module, "_enable_dpi_awareness"), \
+                mock.patch.object(main_module, "setup_logging"), \
+                mock.patch.object(main_module.time, "sleep"):
+            code = main_module._run_overlay_test(0.01)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(captured["settings"], settings)
+        self.assertTrue(captured.get("shown"))
+        self.assertTrue(captured.get("stopped"))
 
 
 if __name__ == "__main__":

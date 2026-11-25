@@ -50,7 +50,6 @@ ACCENTS = {
     "crimson": "#DC2626",
     "mono": "#6B7280",
 }
-STATUS_OK = "#4ADE80"
 STATUS_ERROR = "#F87171"
 
 _SHADOW_OFFSET = 3
@@ -645,11 +644,10 @@ class Overlay:
 # ============ отрисовка ============
 
     def _accent_color(self):
-        if self._mode == "status":
-            if self._status_kind == "ok":
-                return STATUS_OK
-            if self._status_kind == "error":
-                return STATUS_ERROR
+        # Статусы «ok»/«info» красятся темой, как и карточка перевода: раньше
+        # «Готово. F6…» и «Продолжаю» были зелёными независимо от темы.
+        if self._mode == "status" and self._status_kind == "error":
+            return STATUS_ERROR
         return ACCENTS.get(self._accent, ACCENTS["violet"])
 
     def _truncate_source(self, text, wrap):
@@ -674,13 +672,11 @@ class Overlay:
         wrap = width - 2 * _PAD_X
         accent = self._accent_color()
 
-        canvas.create_oval(
-            _PAD_X, _PAD_Y + 2, _PAD_X + 8, _PAD_Y + 10,
-            fill=accent, outline="", tags="text",
-        )
+        # Индикатор-кружочек убран: он всегда был цвета акцента и ничего не
+        # сообщал о состоянии (состояние и так видно по тексту карточки).
         header = "ГАДЖЕТ БУДУЩЕГО · v" + __version__
         canvas.create_text(
-            _PAD_X + 14, _PAD_Y + 4, text=header, anchor="nw",
+            _PAD_X, _PAD_Y + 4, text=header, anchor="nw",
             font=("Segoe UI", 10, "bold"), fill=MUTED, tags="text",
         )
         content_top = _PAD_Y + 18
