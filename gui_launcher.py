@@ -437,6 +437,8 @@ class TranslatorLauncher(ctk.CTk):
         self._downloading_model = None
         self._download_cancel = threading.Event()
         self._shortcut_announced = False
+        # Запуск инициирован, но процесс ещё не создан (идёт проверка модели).
+        self._launch_pending = False
         # Плавная полоска загрузки: цель (0..1) и текущее отображаемое значение.
         self._dl_target = 0.0
         self._dl_shown = 0.0
@@ -1531,8 +1533,24 @@ class TranslatorLauncher(ctk.CTk):
         self._rebuild_ui()
         self._set_status(f"Тема «{label}» применена.", kind="ok")
 
+    def _get_scroll_position(self):
+        """Текущая позиция прокрутки (0..1) или 0.0, если окна ещё нет."""
+        try:
+            return float(self.body._parent_canvas.yview()[0])
+        except Exception:
+            return 0.0
+
+    def _set_scroll_position(self, position):
+        try:
+            self.update_idletasks()
+            value = max(0.0, min(1.0, float(position)))
+            self.body._parent_canvas.yview_moveto(value)
+        except Exception:
+            pass
+
     def _rebuild_ui(self):
-        """Пересобирает окно после смены палитры."""
+        """Пересобирает окно после смены палитры, сохраняя позицию прокрутки."""
+        position = self._get_scroll_position()
         self._theme = apply_theme(self.settings.get("launcher_theme", "violet"))
         for child in self.winfo_children():
             child.destroy()
@@ -1545,11 +1563,8 @@ class TranslatorLauncher(ctk.CTk):
         # Виджеты созданы заново со стоковыми состояниями: если переводчик уже
         # работает, надо вернуть disabled/«Остановить» — иначе его не остановить.
         self._sync_run_buttons()
-        try:
-            self.update_idletasks()
-            self.body._parent_canvas.yview_moveto(0.0)
-        except Exception:
-            pass
+        # Раньше здесь был yview_moveto(0.0) — смена темы отбрасывала к началу.
+        self._set_scroll_position(position)
 
     # ------------------------------------------------------------------ ярлык
     def _shortcut_path(self):
@@ -1618,10 +1633,12 @@ class TranslatorLauncher(ctk.CTk):
                 cmd, cwd=app_root(), creationflags=self._hidden_flags()
             )
         except Exception as e:
+            self._launch_pending = False
             self._set_status(f"Ошибка запуска: {e}", kind="error")
+            self._sync_run_buttons()
             return False
-        self.launch_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
+        self._launch_pending = False
+        self._sync_run_buttons()
         self._set_status(
             "Переводчик запущен БЕЗ прав администратора. Win+Shift+S — скриншот, "
             "F6 — повторить перевод, F7 — скрыть оверлей, F8 — пауза, F9 — очистить память.",
@@ -1639,8 +1656,14 @@ class TranslatorLauncher(ctk.CTk):
             pass
 
     def _launch_with_model(self, cmd, installed):
+        if not self._launch_pending:
+            # Пользователь успел нажать «Остановить», пока шла проверка модели.
+            self._set_status("Запуск отменён.", kind="warn")
+            return
         model = self.ollama_model_var.get().strip()
         if not installed:
+            self._launch_pending = False
+            self._sync_run_buttons()
             self._set_status(
                 f"Модели {model} нет — запускаю загрузку. После окончания нажми "
                 "«Запустить» ещё раз.",
@@ -1653,6 +1676,11 @@ class TranslatorLauncher(ctk.CTk):
     def launch(self):
         if self.process and self.process.poll() is None:
             self._set_status("Переводчик уже запущен.", kind="warn")
+            return
+        if self._launch_pending:
+            self._set_status(
+                "Запуск уже выполняется — дождись проверки модели.", kind="warn"
+            )
             return
 
         provider = self._provider()
@@ -1675,14 +1703,23 @@ class TranslatorLauncher(ctk.CTk):
                 kind="warn",
             )
 
+        # С этого момента запуск «в процессе»: кнопки должны это показывать,
+        # даже если проверка модели ещё идёт в фоне.
+        self._launch_pending = True
+        self._sync_run_buttons()
+
         if provider == "ollama":
             state = self._ollama_state
             if state is None:
                 # Ещё не проверяли (или проверка ещё идёт) — не блокируем UI.
+                self._launch_pending = False
+                self._sync_run_buttons()
                 self._set_status("Проверяю Ollama, нажми «Запустить» ещё раз.", kind="warn")
                 self._check_ollama_async()
                 return
             if not state.get("api"):
+                self._launch_pending = False
+                self._sync_run_buttons()
                 self._update_ollama_banner()
                 self._set_status(
                     "Ollama не запущена. Установи её (кнопка «Скачать Ollama») или "
@@ -1741,9 +1778,18 @@ class TranslatorLauncher(ctk.CTk):
                 pass
 
     def stop(self):
+        # Если запуск ещё идёт (проверка модели), процесса может не быть:
+        # отменяем ожидание, чтобы фоновая проверка его не запустила.
+        cancelled_pending = False
+        if self._launch_pending and not (self.process and self.process.poll() is None):
+            self._launch_pending = False
+            cancelled_pending = True
         self._terminate_process()
         self._sync_run_buttons()
-        self._set_status("Остановлено.", kind="ok")
+        if cancelled_pending:
+            self._set_status("Запуск отменён.", kind="warn")
+        else:
+            self._set_status("Остановлено.", kind="ok")
 
     def _on_close(self):
         if self._downloading_model:
@@ -1826,27 +1872,41 @@ class TranslatorLauncher(ctk.CTk):
         self.log_box.see("end")
 
     def _sync_run_buttons(self):
-        """Приводит кнопки в соответствие с реально запущенными процессами.
+        """Приводит кнопки в соответствие с реальным состоянием запуска.
+
+        Учитывает три состояния:
+        * переводчик работает (процесс жив) — «Остановить» доступна;
+        * запуск в процессе (проверяется модель) — «Запустить» заблокирована,
+          «Остановить» доступна и отменяет ожидание;
+        * ничего не запущено — как обычно.
 
         Нужно после пересборки окна (смена темы): новые виджеты создаются
         активными, и раньше при работающем переводчике «Остановить» оказывалась
         недоступной, а нажатие «Запустить» просто писало «уже запущен».
         """
         running = self.process is not None and self.process.poll() is None
+        pending = bool(getattr(self, "_launch_pending", False)) and not running
         testing = self._test_process is not None and self._test_process.poll() is None
+
         try:
-            self.launch_btn.configure(state="disabled" if running else "normal")
-            self.stop_btn.configure(state="normal" if running else "disabled")
+            self.launch_btn.configure(state="disabled" if (running or pending) else "normal")
+            self.stop_btn.configure(state="normal" if (running or pending) else "disabled")
         except Exception:
             pass
         try:
             self.test_overlay_btn.configure(state="disabled" if testing else "normal")
         except Exception:
             pass
+
         if running:
             self._set_status(
                 "Переводчик уже запущен. Остановить можно кнопкой «Остановить».",
                 kind="ok",
+            )
+        elif pending:
+            self._set_status(
+                "Запускаю переводчик: проверяю модель. «Остановить» отменит запуск.",
+                kind="info",
             )
 
     def _poll_state(self):

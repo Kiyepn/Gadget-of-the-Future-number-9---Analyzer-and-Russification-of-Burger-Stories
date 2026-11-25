@@ -180,10 +180,11 @@ class FakeProcess:
 class RunButtonsSyncTests(unittest.TestCase):
     """После смены темы кнопки должны отражать реально запущенный переводчик."""
 
-    def _fake_launcher(self, running, testing=False):
+    def _fake_launcher(self, running, testing=False, pending=False):
         stub = type("Stub", (), {})()
         stub.process = FakeProcess(alive=running) if running else None
         stub._test_process = FakeProcess(alive=True) if testing else None
+        stub._launch_pending = pending
         stub.launch_btn = FakeButton()
         stub.stop_btn = FakeButton()
         stub.test_overlay_btn = FakeButton()
@@ -205,6 +206,20 @@ class RunButtonsSyncTests(unittest.TestCase):
         self.assertEqual(stub.stop_btn.state, "disabled")
         self.assertIsNone(stub.status_text)
 
+    def test_pending_launch_disables_start_and_allows_stop(self):
+        # Гонка: тема сменилась, пока шла проверка модели — процесса ещё нет.
+        stub = self._fake_launcher(running=False, pending=True)
+        launcher.TranslatorLauncher._sync_run_buttons(stub)
+        self.assertEqual(stub.launch_btn.state, "disabled")
+        self.assertEqual(stub.stop_btn.state, "normal")
+        self.assertIn("Запускаю", stub.status_text)
+
+    def test_running_wins_over_pending(self):
+        stub = self._fake_launcher(running=True, pending=True)
+        launcher.TranslatorLauncher._sync_run_buttons(stub)
+        self.assertEqual(stub.stop_btn.state, "normal")
+        self.assertIn("уже запущен", stub.status_text)
+
     def test_running_overlay_test_disables_button(self):
         stub = self._fake_launcher(running=False, testing=True)
         launcher.TranslatorLauncher._sync_run_buttons(stub)
@@ -216,6 +231,54 @@ class RunButtonsSyncTests(unittest.TestCase):
         launcher.TranslatorLauncher._sync_run_buttons(stub)
         self.assertEqual(stub.launch_btn.state, "normal")
         self.assertEqual(stub.stop_btn.state, "disabled")
+
+
+class LauncherGuiTests(unittest.TestCase):
+    """Проверки на реальном окне: скролл и кнопки при смене темы."""
+
+    def setUp(self):
+        try:
+            self.app = launcher.TranslatorLauncher()
+        except Exception as exc:  # pragma: no cover - зависит от окружения
+            self.skipTest(f"нет GUI: {exc}")
+        self.app.update()
+
+    def tearDown(self):
+        try:
+            self.app.destroy()
+        except Exception:
+            pass
+        launcher.apply_theme("violet")
+
+    def test_theme_change_keeps_scroll_position(self):
+        canvas = self.app.body._parent_canvas
+        canvas.yview_moveto(0.5)
+        self.app.update()
+        before = canvas.yview()[0]
+        self.assertGreater(before, 0.2)  # прокрутка реально ушла вниз
+
+        self.app.settings["launcher_theme"] = "blue"
+        self.app._rebuild_ui()
+        self.app.update()
+
+        after = self.app.body._parent_canvas.yview()[0]
+        self.assertAlmostEqual(before, after, delta=0.05)
+
+    def test_theme_change_during_pending_launch_keeps_buttons_sane(self):
+        # Имитируем «модель ещё проверяется»: процесса нет, запуск в процессе.
+        self.app.process = None
+        self.app._launch_pending = True
+        self.app.settings["launcher_theme"] = "blue"
+        self.app._rebuild_ui()
+        self.app.update()
+
+        self.assertEqual(self.app.launch_btn.cget("state"), "disabled")
+        self.assertEqual(self.app.stop_btn.cget("state"), "normal")
+
+        self.app.stop()
+        self.assertFalse(self.app._launch_pending)
+        self.assertEqual(self.app.launch_btn.cget("state"), "normal")
+        self.assertEqual(self.app.stop_btn.cget("state"), "disabled")
 
 
 class OverlayAccentTests(unittest.TestCase):
