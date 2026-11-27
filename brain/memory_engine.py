@@ -154,6 +154,11 @@ def normalize_character_card(value, description=None):
     Понимает оба формата: старую строку (она становится ``description``) и уже
     готовый словарь. Неизвестные поля сохраняются, чтобы новые поля не терялись
     при чтении-записи файла.
+
+    Пол и местоимения приводятся к согласованному виду: если модель не назвала
+    пол, но явно написала ``he/him`` или ``she/her``, пол выводится из них.
+    Так qwen2.5:3b (он почти всегда отдаёт ``gender: "unknown"``, но местоимения
+    угадывает верно) всё равно даёт пригодную карточку.
     """
     card = dict(DEFAULT_CHARACTER_CARD)
     if isinstance(value, dict):
@@ -165,17 +170,21 @@ def normalize_character_card(value, description=None):
         card["description"] = str(description)
 
     gender = str(card.get("gender") or "").strip().lower()
-    card["gender"] = gender if gender in _GENDERS else "unknown"
+    gender = gender if gender in _GENDERS else "unknown"
 
-    # Местоимения: явно заданные моделью уважаем, иначе выводим их из пола.
-    # (Раньше здесь дефолт "they/them" перебивал вывод he/him и she/her.)
     given_pronouns = ""
     if isinstance(value, dict):
         given_pronouns = str(value.get("pronouns") or "").strip().lower()
-    pronouns = given_pronouns if given_pronouns in _PRONOUNS else ""
-    if not pronouns:
-        pronouns = _PRONOUN_BY_GENDER[card["gender"]]
-    card["pronouns"] = pronouns
+    if given_pronouns not in _PRONOUNS:
+        given_pronouns = ""
+
+    if gender == "unknown" and given_pronouns in ("he/him", "she/her"):
+        gender = "male" if given_pronouns == "he/him" else "female"
+
+    card["gender"] = gender
+    # Местоимения всегда согласованы с итоговым полом: карточка не должна
+    # одновременно говорить «female» и «he/him».
+    card["pronouns"] = _PRONOUN_BY_GENDER[gender]
 
     address = str(card.get("address") or "").strip().lower()
     card["address"] = address if address in _ADDRESSES else "ty"

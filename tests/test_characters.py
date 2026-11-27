@@ -111,6 +111,27 @@ class CardNormalizationTests(unittest.TestCase):
             normalize_character_card({"gender": "male"})["pronouns"], "he/him"
         )
 
+    def test_gender_derived_from_pronouns_when_unknown(self):
+        # qwen2.5:3b обычно отдаёт gender="unknown", но верные местоимения.
+        male = normalize_character_card({"pronouns": "he/him"})
+        self.assertEqual(male["gender"], "male")
+        self.assertEqual(male["pronouns"], "he/him")
+
+        female = normalize_character_card({"pronouns": "she/her"})
+        self.assertEqual(female["gender"], "female")
+        self.assertEqual(female["pronouns"], "she/her")
+
+    def test_neutral_pronouns_keep_gender_unknown(self):
+        card = normalize_character_card({"pronouns": "they/them"})
+        self.assertEqual(card["gender"], "unknown")
+        self.assertEqual(card["pronouns"], "they/them")
+
+    def test_explicit_gender_wins_over_pronouns(self):
+        # Карточка не должна говорить «female» и «he/him» одновременно.
+        card = normalize_character_card({"gender": "female", "pronouns": "he/him"})
+        self.assertEqual(card["gender"], "female")
+        self.assertEqual(card["pronouns"], "she/her")
+
     def test_unknown_gender_and_address_fall_back(self):
         card = normalize_character_card(
             {"gender": "робот", "address": "господин", "description": "Страж"}
@@ -312,6 +333,17 @@ class ParseCharacterCardsTests(unittest.TestCase):
         self.assertEqual(parsed["Alice"]["pronouns"], "she/her")
         self.assertEqual(parsed["Alice"]["address"], "ty")
 
+    def test_qwen_style_card_gets_gender_from_pronouns(self):
+        # Реальный ответ qwen2.5:3b: пол unknown, но местоимения he/him.
+        raw = json.dumps(
+            {"Bob": {"gender": "unknown", "pronouns": "he/him", "address": "ty",
+                     "manner": "сдержанный", "description": "Старший смотритель"}},
+            ensure_ascii=False,
+        )
+        parsed = llm._parse_character_cards(raw)
+        self.assertEqual(parsed["Bob"]["gender"], "male")
+        self.assertEqual(parsed["Bob"]["pronouns"], "he/him")
+
     def test_empty_object_means_no_character(self):
         self.assertEqual(llm._parse_character_cards("{}"), {})
 
@@ -465,6 +497,25 @@ class BackgroundAnalyzeCardTests(TempDataDirCase):
 
         self.assertEqual(saved["Alice"]["description"], "Хранительница маяка")
         self.assertEqual(saved["Alice"]["gender"], "unknown")
+
+    def test_qwen_style_card_is_saved_with_derived_gender(self):
+        # Без этого карточки от qwen2.5:3b оставались бы с gender=unknown.
+        raw = json.dumps(
+            {"Bob": {"gender": "unknown", "pronouns": "he/him", "address": "ty",
+                     "manner": "сухой", "description": "Старший смотритель"}},
+            ensure_ascii=False,
+        )
+        with mock.patch.object(
+            llm.web_search, "fetch_character_lore", return_value=""
+        ), mock.patch.object(llm, "_lore_completion", return_value=raw):
+            llm.background_analyze(
+                "Bob", "Bob: hi", {"provider": "ollama", "model": "x"}
+            )
+
+        card = load_characters()["Bob"]
+        self.assertEqual(card["gender"], "male")
+        self.assertEqual(card["pronouns"], "he/him")
+        self.assertEqual(card["description"], "Старший смотритель")
 
     def test_duckduckgo_lore_saved_as_description(self):
         saved = {}
