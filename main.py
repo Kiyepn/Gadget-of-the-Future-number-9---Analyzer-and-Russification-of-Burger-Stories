@@ -34,6 +34,7 @@ from brain.ocr_providers import (
 )
 from brain.overlay import Overlay
 from brain.paths import data_location_hint, ensure_data_dir
+from brain.providers import PROVIDERS, make_provider, settings_fingerprint
 from brain.settings import load_settings
 from brain.version import APP_TITLE, __version__
 
@@ -541,6 +542,70 @@ def _run_overlay_test(seconds):
     return 0
 
 
+def _create_llm_provider(settings):
+    """Создаёт провайдера перевода по настройкам (None — если настроен неверно)."""
+    name = str((settings or {}).get("provider") or "ollama").strip().lower()
+    if name not in PROVIDERS:
+        log.warning("Неизвестный провайдер «%s» — использую ollama.", name)
+        name = "ollama"
+    try:
+        return make_provider(name, settings)
+    except (PermissionError, ValueError) as exc:
+        log.error("Перевод: не удалось создать провайдера «%s»: %s", name, exc)
+        return None
+
+
+def _translator_with_provider(translate, settings):
+    """Оборачивает translate() провайдером, который переживает смену настроек.
+
+    Провайдер создаётся один раз (он держит requests.Session с keep-alive), но
+    если в лаунчере сменили провайдера/модель/ключ, он пересоздаётся на
+    следующем кадре — прежнее поведение «настройки подхватываются без
+    перезапуска переводчика» сохраняется.
+    """
+    state = {"settings": dict(settings or {}), "provider": _create_llm_provider(settings)}
+
+    def _translate(text):
+        try:
+            fresh = load_settings()
+        except Exception:
+            fresh = state["settings"]
+        if settings_fingerprint(fresh) != settings_fingerprint(state["settings"]):
+            log.info(
+                "Настройки перевода изменились — создаю нового провайдера (%s).",
+                fresh.get("provider"),
+            )
+            previous = state["provider"]
+            state["settings"] = fresh
+            state["provider"] = _create_llm_provider(fresh)
+            # Старый провайдер держит requests.Session: закрываем, чтобы после
+            # нескольких переключений в лаунчере не копились соединения.
+            if previous is not None and previous is not state["provider"]:
+                try:
+                    previous.close()
+                except Exception:
+                    pass
+
+        provider = state["provider"]
+        if provider is None:
+            # translate() построит провайдера сама и вернёт понятное сообщение
+            # об ошибке вместо падения цикла захвата.
+            return translate(text)
+        return translate(text, provider=provider)
+
+    def _close():
+        """Закрывает текущий провайдер (requests.Session) при остановке."""
+        provider = state["provider"]
+        if provider is not None:
+            try:
+                provider.close()
+            except Exception:
+                pass
+
+    _translate.close = _close
+    return _translate
+
+
 def _run_translator(args):
     global _overlay, _mutex_handle
 
@@ -562,6 +627,7 @@ def _run_translator(args):
         return 0
 
     hotkeys = None
+    close_translate = None
     try:
         from brain.settings import load_settings
 
@@ -601,10 +667,16 @@ def _run_translator(args):
         backend = hotkeys.start()
         log.info("Горячие клавиши: %s", backend or "недоступны")
 
+        # Провайдер перевода создаётся здесь один раз (см. _create_llm_provider)
+        # и передаётся в translate(); при смене настроек в лаунчере он
+        # пересоздаётся обёрткой — перезапуск переводчика не нужен.
+        _translate = _translator_with_provider(translate, settings)
+        close_translate = getattr(_translate, "close", None)
+
         # Настройки передаём в анализ лора: он должен считать той же моделью,
         # что выбрана для перевода (Ollama или DeepSeek), а не отдельной.
-        # Перечитываем их на каждого нового персонажа — translate() делает так же,
-        # поэтому смена провайдера в лаунчере подхватывается без перезапуска.
+        # Перечитываем их на каждого нового персонажа — как и для перевода,
+        # поэтому смена провайдера подхватывается без перезапуска.
         def _analyze_character(text):
             try:
                 current_settings = load_settings()
@@ -612,7 +684,7 @@ def _run_translator(args):
                 current_settings = settings
             return analyze_character(text, current_settings)
 
-        _capture_loop(ocr, translate, _analyze_character, clear_memory)
+        _capture_loop(ocr, _translate, _analyze_character, clear_memory)
     except KeyboardInterrupt:
         log.info("Остановка по Ctrl+C.")
     except SystemExit:
@@ -628,6 +700,8 @@ def _run_translator(args):
                 pass
         return 1
     finally:
+        if callable(close_translate):
+            close_translate()
         if hotkeys is not None:
             hotkeys.stop()
         if _overlay is not None:

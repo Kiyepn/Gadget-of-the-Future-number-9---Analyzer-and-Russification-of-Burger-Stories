@@ -18,6 +18,11 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import brain.llm_engine as llm  # noqa: E402
+from brain.providers import (  # noqa: E402
+    ProviderHTTPError,
+    RateLimitError,
+    make_provider,
+)
 
 
 class FakeResponse:
@@ -29,6 +34,17 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+
+def _fake_provider(label, content=None, side_effect=None):
+    """Заглушка провайдера: _lore_completion должен работать только через неё."""
+    provider = mock.Mock()
+    provider.label = label
+    if side_effect is not None:
+        provider.generate.side_effect = side_effect
+    else:
+        provider.generate.return_value = content
+    return provider
 
 
 def _clear_lore_state():
@@ -136,89 +152,120 @@ class OllamaModelReadyTests(unittest.TestCase):
 
 
 class OllamaLoreCompletionTests(unittest.TestCase):
+    """Лор идёт через общий провайдер, а не через нативный /api/generate."""
+
     def test_request_uses_selected_model(self):
         cfg = {"provider": "ollama", "model": "qwen2.5:3b", "api_key": ""}
-        fake = FakeResponse({"response": '{"Alice": "Загадочная."}'})
+        fake_provider = _fake_provider("Ollama", '{"Alice": "Загадочная."}')
         with mock.patch.object(llm, "_ollama_model_ready", return_value=(True, "")) as ready, \
-                mock.patch.object(llm.requests, "post", return_value=fake) as post:
+                mock.patch.object(llm, "make_provider", return_value=fake_provider) as factory:
             raw = llm._lore_completion("prompt", cfg)
 
         self.assertIn("Alice", raw)
         ready.assert_called_once_with("qwen2.5:3b")
-        payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "qwen2.5:3b")
-        self.assertNotEqual(payload["model"], "gemma2:9b")
+        self.assertEqual(factory.call_args.args[0], "ollama")
+        self.assertEqual(factory.call_args.kwargs["model"], "qwen2.5:3b")
+        self.assertEqual(fake_provider.generate.call_args.args[0], "prompt")
+        fake_provider.close.assert_called_once()
 
     def test_unavailable_model_skips_request(self):
         cfg = {"provider": "ollama", "model": "gemma2:9b", "api_key": ""}
         with mock.patch.object(
             llm, "_ollama_model_ready", return_value=(False, "модель «gemma2:9b» не найдена")
-        ), mock.patch.object(llm.requests, "post") as post:
+        ), mock.patch.object(llm, "make_provider") as factory:
             self.assertIsNone(llm._lore_completion("prompt", cfg))
-        post.assert_not_called()
+        factory.assert_not_called()
 
     def test_http_error_returns_none(self):
         cfg = {"provider": "ollama", "model": "qwen2.5:3b", "api_key": ""}
+        fake_provider = _fake_provider(
+            "Ollama", side_effect=ProviderHTTPError("ollama", 500, "boom")
+        )
         with mock.patch.object(llm, "_ollama_model_ready", return_value=(True, "")), \
-                mock.patch.object(llm.requests, "post", return_value=FakeResponse({"error": "boom"})):
+                mock.patch.object(llm, "make_provider", return_value=fake_provider):
             self.assertIsNone(llm._lore_completion("prompt", cfg))
+        # Провайдер закрывается и на пути ошибки, а не только при успехе.
+        fake_provider.close.assert_called_once()
 
     def test_connection_error_returns_none(self):
         cfg = {"provider": "ollama", "model": "qwen2.5:3b", "api_key": ""}
+        fake_provider = _fake_provider("Ollama", side_effect=OSError("down"))
         with mock.patch.object(llm, "_ollama_model_ready", return_value=(True, "")), \
-                mock.patch.object(llm.requests, "post", side_effect=OSError("down")):
+                mock.patch.object(llm, "make_provider", return_value=fake_provider):
             self.assertIsNone(llm._lore_completion("prompt", cfg))
 
 
 class DeepSeekLoreCompletionTests(unittest.TestCase):
     def test_uses_model_and_key(self):
         cfg = {"provider": "deepseek", "model": "deepseek-chat", "api_key": "sk-test"}
-        fake = FakeResponse({"choices": [{"message": {"content": '{"Alice": "Описание."}'}}]})
-        with mock.patch.object(llm.requests, "post", return_value=fake) as post:
+        fake_provider = _fake_provider("DeepSeek", '{"Alice": "Описание."}')
+        with mock.patch.object(llm, "make_provider", return_value=fake_provider) as factory:
             raw = llm._lore_completion("prompt", cfg)
 
         self.assertIn("Alice", raw)
-        args = post.call_args
-        self.assertEqual(args.args[0], llm.DEEPSEEK_URL)
-        self.assertEqual(args.kwargs["headers"]["Authorization"], "Bearer sk-test")
-        self.assertEqual(args.kwargs["json"]["model"], "deepseek-chat")
+        self.assertEqual(factory.call_args.args[0], "deepseek")
+        self.assertEqual(factory.call_args.kwargs["model"], "deepseek-chat")
+        # Ключ уходит в настройки провайдера, а не в сам HTTP-запрос.
+        settings = factory.call_args.args[1]
+        self.assertEqual(settings["api_key"], "sk-test")
+        self.assertEqual(settings["deepseek_model"], "deepseek-chat")
+        fake_provider.close.assert_called_once()
 
     def test_without_key_returns_none(self):
         cfg = {"provider": "deepseek", "model": "deepseek-chat", "api_key": ""}
-        with mock.patch.object(llm.requests, "post") as post:
+        with mock.patch.object(llm, "make_provider") as factory:
             self.assertIsNone(llm._lore_completion("prompt", cfg))
-        post.assert_not_called()
+        factory.assert_not_called()
 
     def test_http_error_returns_none(self):
         cfg = {"provider": "deepseek", "model": "deepseek-chat", "api_key": "sk-test"}
-        fake = FakeResponse({"error": {"message": "Authentication Fails"}}, status_code=401)
-        with mock.patch.object(llm.requests, "post", return_value=fake):
+        fake_provider = _fake_provider(
+            "DeepSeek", side_effect=PermissionError("Неверный API-ключ для DeepSeek")
+        )
+        with mock.patch.object(llm, "make_provider", return_value=fake_provider):
             self.assertIsNone(llm._lore_completion("prompt", cfg))
 
     def test_429_returns_none_with_clear_message(self):
         cfg = {"provider": "deepseek", "model": "deepseek-chat", "api_key": "sk-test"}
-        fake = FakeResponse(
-            {"error": {"message": "Rate limit reached"}},
-            status_code=429,
-            headers={"Retry-After": "30"},
+        fake_provider = _fake_provider(
+            "DeepSeek", side_effect=RateLimitError("deepseek", 7)
         )
-        with mock.patch.object(llm.requests, "post", return_value=fake):
+        with mock.patch.object(llm, "make_provider", return_value=fake_provider):
             with self.assertLogs(llm.log, level="WARNING") as captured:
                 self.assertIsNone(llm._lore_completion("prompt", cfg))
         text = "\n".join(captured.output)
         self.assertIn("429", text)
-        self.assertIn("30", text)
+        # Именно то число, которое прислал сервер (а не 30 по умолчанию).
+        self.assertIn("7", text)
         self.assertIn("лимит", text)
+        fake_provider.close.assert_called_once()
+
+    def test_429_without_retry_after_does_not_invent_wait(self):
+        cfg = {"provider": "deepseek", "model": "deepseek-chat", "api_key": "sk-test"}
+        fake_provider = _fake_provider(
+            "DeepSeek", side_effect=RateLimitError("deepseek", None)
+        )
+        with mock.patch.object(llm, "make_provider", return_value=fake_provider):
+            with self.assertLogs(llm.log, level="WARNING") as captured:
+                self.assertIsNone(llm._lore_completion("prompt", cfg))
+        text = "\n".join(captured.output)
+        self.assertIn("429", text)
+        # Не выдумываем «сервер просит подождать N с», если заголовка не было.
+        self.assertNotIn("просит подождать", text)
 
 
 class DeepSeekTranslationErrorTests(unittest.TestCase):
     def test_429_message_for_translation(self):
-        fake = FakeResponse({"error": {"message": "Rate limit reached"}}, status_code=429)
-        with mock.patch.object(llm.requests, "post", return_value=fake), \
-                mock.patch.object(
-                    llm, "_build_translation_prompt", return_value=("system", "user")
-                ):
-            result = llm.ask_deepseek("hi", api_key="sk-test")
+        provider = make_provider(
+            "deepseek", {"api_key": "sk-test", "deepseek_model": "deepseek-chat"}
+        )
+        self.addCleanup(provider.close)
+        with mock.patch.object(
+            provider, "generate", side_effect=RateLimitError("deepseek", 30)
+        ), mock.patch.object(
+            llm, "_build_translation_prompt", return_value=("system", "user")
+        ):
+            result = llm.translate("hi", provider=provider)
         self.assertIn("429", result)
         self.assertIn("лимит", result)
 

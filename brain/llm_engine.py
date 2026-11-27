@@ -11,6 +11,14 @@ from brain.paths import data_file, ensure_data_dir, load_config
 from brain.memory_engine import format_memory_for_prompt, save_memory, format_characters_for_prompt, save_character, load_characters
 from brain import web_search
 from brain.settings import load_settings
+from brain.providers import (
+    DEEPSEEK_BASE_URL,
+    PROVIDERS,
+    ProviderError,
+    RateLimitError,
+    make_provider,
+    ollama_native_base,
+)
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +31,9 @@ def glossary_path():
     return data_file('glossary.json')
 
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+# Обратная совместимость: до 1.6.0 это была отдельная константа модуля.
+# Теперь адреса провайдеров живут в brain/providers.py.
+DEEPSEEK_URL = f"{DEEPSEEK_BASE_URL}/chat/completions"
 
 # Жёсткие правила против галлюцинаций (выдуманные имена и обработка "Me:")
 ANTI_HALLUCINATION_RULES = """8. NO INVENTED NAMES: Never invent or insert any names (for example "Denis", "Denis:") that are NOT present in the original text. Translate only what is actually written; do not add speaker names that do not exist in the source.
@@ -64,13 +74,16 @@ def _unknown_terms_from_model(text):
         "Text:\n\"" + text + "\""
     )
     try:
-        response = requests.post(config.OLLAMA_URL, json={
-            "model": config.MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.0, "num_predict": 120}
-        }, timeout=45)
-        raw = response.json().get('response', '').strip()
+        # Раньше это был прямой запрос в нативный /api/generate. Теперь — общий
+        # провайдер: тот же OpenAI-совместимый endpoint, что и у перевода.
+        # Модель берём из config.MODEL_NAME, как раньше: настройки здесь
+        # читать незачем (этот помощник вызывается на каждом кадре).
+        with make_provider(
+            "ollama", {"ollama_model": config.MODEL_NAME}, timeout=45
+        ) as provider:
+            raw = provider.generate(
+                prompt, max_tokens=120, temperature=0.0, timeout=45
+            ).strip()
     except Exception:
         return []
 
@@ -115,51 +128,6 @@ def _get_web_context(text):
     return web_search.format_context(context_map)
 
 
-def ask_ollama(text, model=None):
-    model = model or config.MODEL_NAME
-    context = format_memory_for_prompt()
-    lore = format_characters_for_prompt()
-    glossary = format_glossary_for_prompt()
-    web_context = _get_web_context(text)
-    
-    full_prompt = f"""{config.SYSTEM_PROMPT}
-
-{ANTI_HALLUCINATION_RULES}
-
-{glossary}
-
-{web_context}
-
-{lore}
-
-{context}
-
-Text to process:
-"{text}"
-"""
-    
-    for attempt in range(3):
-        try:
-            response = requests.post(config.OLLAMA_URL, json={
-                "model": model,
-                "prompt": full_prompt,
-                "stream": False,
-                "options": config.OPTIONS
-            }, timeout=60)
-            
-            result = response.json()['response'].strip()
-            
-            if not result or result.lower() == "none":
-                return "[Модель не смогла перевести]"
-                
-            save_memory(text, result)
-            return result
-            
-        except Exception as e:
-            log.warning(f"[Ошибка Ollama] Попытка {attempt + 1} не удалась: {e}")
-            time.sleep(2)
-    return "[Ошибка: Ollama не отвечает]"
-
 def _build_translation_prompt(text):
     """Собирает системную и пользовательскую части промпта перевода."""
     context = format_memory_for_prompt()
@@ -178,72 +146,104 @@ def _build_translation_prompt(text):
     return system, user
 
 
-def ask_deepseek(text, api_key=None, model=None):
-    """Перевод через облачный API DeepSeek (OpenAI-совместимый chat/completions)."""
-    api_key = (api_key or "").strip()
-    if not api_key:
-        return "[Ошибка: не указан API-ключ DeepSeek]"
-
-    model = model or "deepseek-chat"
-    system, user = _build_translation_prompt(text)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 512,
-        "stream": False,
-    }
-
-    for attempt in range(3):
+def _selected_provider_name(settings=None):
+    """Имя провайдера из настроек. Неизвестное значение — откат на Ollama."""
+    if settings is None:
         try:
-            response = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=60)
-            data = response.json()
-
-            if response.status_code != 200:
-                err = data.get("error") or {}
-                msg = err.get("message") if isinstance(err, dict) else str(err)
-                log.error(f"[Ошибка DeepSeek] HTTP {response.status_code}: {msg}")
-                if response.status_code == 429:
-                    return (
-                        "[Ошибка DeepSeek: превышен лимит запросов (429). "
-                        "Подожди немного и повтори.]"
-                    )
-                return f"[Ошибка DeepSeek: {msg}]"
-
-            result = (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-            if not result or result.lower() == "none":
-                return "[Модель не смогла перевести]"
-
-            save_memory(text, result)
-            return result
-
-        except Exception as e:
-            log.warning(f"[Ошибка DeepSeek] Попытка {attempt + 1} не удалась: {e}")
-            time.sleep(2)
-    return "[Ошибка: DeepSeek не отвечает]"
+            settings = load_settings()
+        except Exception:
+            # Настройки недоступны — не роняем перевод, работаем как с Ollama.
+            return "ollama"
+    name = str((settings or {}).get("provider") or "ollama").strip().lower()
+    return name if name in PROVIDERS else "ollama"
 
 
-def translate(text):
-    """Единая точка входа перевода: выбирает Ollama или DeepSeek по настройкам."""
-    settings = load_settings()
-    provider = (settings.get("provider") or "ollama").lower()
+def _translation_options():
+    """Параметры генерации из config.OPTIONS в именах OpenAI-совместимого API."""
+    options = getattr(config, "OPTIONS", None) or {}
+    max_tokens = options.get("num_predict", 512)
+    temperature = options.get("temperature", 0.0)
+    top_p = options.get("top_p")
+    presence_penalty = options.get("presence_penalty")
+    return {
+        "max_tokens": int(max_tokens) if max_tokens else 512,
+        "temperature": float(temperature) if temperature is not None else 0.0,
+        "top_p": float(top_p) if top_p is not None else None,
+        "presence_penalty": (
+            float(presence_penalty) if presence_penalty is not None else None
+        ),
+    }
 
-    if provider == "deepseek":
-        return ask_deepseek(
-            text,
-            api_key=settings.get("api_key"),
-            model=settings.get("deepseek_model"),
-        )
 
-    return ask_ollama(text, model=settings.get("ollama_model") or None)
+def translate(text, provider=None, settings=None, system_prompt=None):
+    """Единая точка входа перевода — для Ollama, DeepSeek и любого нового провайдера.
+
+    ``provider`` — готовый OpenAICompatibleProvider. main.py создаёт его один раз
+    (и пересоздаёт только при смене настроек в лаунчере) и передаёт сюда: так
+    запросы идут через одно соединение, а добавление провайдера не требует
+    правок этого модуля.
+
+    Если ``provider`` не передан, он строится по настройкам. Это сохраняет
+    прежний вызов ``translate(text)`` и удобно для тестов.
+    """
+    owns_provider = provider is None
+    if provider is None:
+        if settings is None:
+            # Прежний вызов translate(text) не принимал настроек — читаем их сами,
+            # иначе провайдер получился бы с моделью по умолчанию и без ключа.
+            try:
+                settings = load_settings()
+            except Exception as exc:
+                log.error("[Перевод] Не удалось прочитать настройки: %s", exc)
+                settings = None
+        try:
+            provider = make_provider(_selected_provider_name(settings), settings)
+        except (PermissionError, ValueError) as exc:
+            log.error("[Перевод] Не удалось создать провайдера: %s", exc)
+            return f"[Ошибка: {exc}]"
+
+    try:
+        system, user = _build_translation_prompt(text)
+        if system_prompt:
+            system = system_prompt
+
+        label = provider.label
+        try:
+            result = provider.generate(
+                user, system_prompt=system, **_translation_options()
+            )
+        except RateLimitError:
+            # Ровно то же сообщение, что было в 1.5.2.
+            return (
+                f"[Ошибка {label}: превышен лимит запросов (429). "
+                "Подожди немного и повтори.]"
+            )
+        except PermissionError as exc:
+            log.error("[Ошибка %s] %s", label, exc)
+            return f"[Ошибка {label}: {exc}]"
+        except requests.Timeout:
+            return f"[Ошибка: {label} не отвечает]"
+        except ProviderError as exc:
+            log.error("[Ошибка %s] %s", label, exc)
+            return f"[Ошибка {label}: {exc}]"
+        except Exception as exc:
+            log.error("[Ошибка %s] %s", label, exc)
+            return f"[Ошибка {label}: {exc}]"
+
+        if not result or result.lower() == "none":
+            return "[Модель не смогла перевести]"
+
+        save_memory(text, result)
+        return result
+    finally:
+        # Провайдер, созданный здесь, закрываем: иначе на каждом кадре оставался
+        # бы незакрытый requests.Session. Переданный снаружи провайдер живёт
+        # дольше и закрывается своим владельцем.
+        if owns_provider:
+            try:
+                provider.close()
+            except Exception:
+                pass
 
 
 # ============ лор персонажей ============
@@ -341,9 +341,12 @@ def _lore_release(name):
 
 
 def _ollama_base_url():
-    """База Ollama из config.OLLAMA_URL (…/api/generate -> http://host:port)."""
-    url = (getattr(config, "OLLAMA_URL", "") or "http://localhost:11434/api/generate")
-    return url.split("/api/")[0].rstrip("/")
+    """Корень Ollama (http://host:port) для нативных запросов вроде /api/tags.
+
+    Адрес по-прежнему выводится из config.OLLAMA_URL, но разбор вынесен в
+    brain/providers.py — там же, где строится OpenAI-совместимый /v1.
+    """
+    return ollama_native_base()
 
 
 def _normalize_model_name(name):
@@ -420,97 +423,87 @@ def _ollama_model_ready(model, timeout=2.5):
     return True, ""
 
 
+#: Системная инструкция для лора — одна для всех провайдеров.
+#: До 1.6.0 она передавалась только в DeepSeek, а Ollama получала голый промпт.
+_LORE_SYSTEM_PROMPT = (
+    "Ты описываешь персонажей визуальных новелл. "
+    "Отвечай только валидным JSON-объектом на русском языке."
+)
+_LORE_MAX_TOKENS = 120
+_LORE_TEMPERATURE = 0.1
+
+
 def _lore_completion(prompt, model_config, timeout=60):
-    """Запрос к выбранной модели. Возвращает текст ответа или None.
+    """Запрос к выбранной модели через общий провайдер. Возвращает текст или None.
 
     None означает «провайдер недоступен/не настроен» — в этом случае лор
-    остаётся пустым, а приложение продолжает работать.
+    остаётся пустым, а приложение продолжает работать. Ошибки транспорта
+    (429, 401, таймауты) обрабатывает brain/providers.py, здесь — только
+    лор-специфичная реакция на них.
     """
-    provider = (model_config or {}).get("provider") or "ollama"
+    provider_name = (model_config or {}).get("provider") or "ollama"
     model = (model_config or {}).get("model") or config.MODEL_NAME
+    api_key = (model_config or {}).get("api_key") or ""
 
-    if provider == "deepseek":
-        api_key = (model_config or {}).get("api_key") or ""
-        if not api_key:
-            log.warning("[Лор] Выбран DeepSeek, но API-ключ не задан — лор не будет сохранён.")
-            return None
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты описываешь персонажей визуальных новелл. "
-                        "Отвечай только валидным JSON-объектом на русском языке."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 120,
-            "stream": False,
-        }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        try:
-            started = time.monotonic()
-            response = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
-            data = response.json()
-            elapsed = time.monotonic() - started
-            if response.status_code == 429:
-                retry_after = ""
-                try:
-                    retry_after = str(response.headers.get("Retry-After") or "")
-                except Exception:
-                    retry_after = ""
-                log.warning(
-                    "[Лор] DeepSeek: превышен лимит запросов (429 Too Many Requests)%s "
-                    "— лор не сохранён, попробую позже.",
-                    f", сервер просит подождать {retry_after} с" if retry_after else "",
-                )
-                return None
-            if response.status_code != 200:
-                err = (data.get("error") or {}) if isinstance(data, dict) else {}
-                message = err.get("message") if isinstance(err, dict) else str(err)
-                log.warning("[Лор] DeepSeek ответил HTTP %s: %s", response.status_code, message)
-                return None
-            choices = data.get("choices") or [{}]
-            content = (choices[0].get("message") or {}).get("content", "")
-            log.info("[Лор] Модель %s ответила за %.2f с.", model, elapsed)
-            return content or None
-        except Exception as exc:
-            log.warning("[Лор] DeepSeek недоступен: %s", exc)
-            return None
-
-    ready, reason = _ollama_model_ready(model)
-    if not ready:
-        log.warning("[Лор] Локальная модель недоступна: %s — лор не будет сохранён.", reason)
+    if provider_name == "deepseek" and not api_key:
+        log.warning("[Лор] Выбран DeepSeek, но API-ключ не задан — лор не будет сохранён.")
         return None
 
+    # Для Ollama заранее проверяем, что модель скачана: иначе в журнале будет
+    # понятная причина, а не 404 от /v1 или таймаут.
+    if provider_name == "ollama":
+        ready, reason = _ollama_model_ready(model)
+        if not ready:
+            log.warning("[Лор] Локальная модель недоступна: %s — лор не будет сохранён.", reason)
+            return None
+
+    settings = {
+        "ollama_model": model,
+        "deepseek_model": model,
+        "api_key": api_key,
+    }
     try:
-        started = time.monotonic()
-        response = requests.post(
-            config.OLLAMA_URL,
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 80},
-            },
-            timeout=timeout,
-        )
-        elapsed = time.monotonic() - started
-        data = response.json() or {}
-        if data.get("error"):
-            log.warning("[Лор] Ollama вернула ошибку: %s", data["error"])
-            return None
-        log.info("[Лор] Модель %s ответила за %.2f с.", model, elapsed)
-        return data.get("response") or None
-    except Exception as exc:
-        log.warning("[Лор] Ollama недоступна: %s", exc)
+        provider = make_provider(provider_name, settings, model=model, timeout=timeout)
+    except (PermissionError, ValueError) as exc:
+        log.warning("[Лор] Не удалось создать провайдера: %s — лор не сохранён.", exc)
         return None
+
+    label = provider.label
+    started = time.monotonic()
+    try:
+        content = provider.generate(
+            prompt,
+            system_prompt=_LORE_SYSTEM_PROMPT,
+            max_tokens=_LORE_MAX_TOKENS,
+            temperature=_LORE_TEMPERATURE,
+        )
+    except RateLimitError as exc:
+        # Старый формат строки сохранён; «сервер просит подождать N с» пишем
+        # только если сервер реально прислал Retry-After.
+        wait_hint = (
+            f", сервер просит подождать {exc.retry_after:.0f} с"
+            if exc.retry_after is not None
+            else ""
+        )
+        log.warning(
+            "[Лор] %s: превышен лимит запросов (429 Too Many Requests)%s "
+            "— лор не сохранён, попробую позже.",
+            label,
+            wait_hint,
+        )
+        return None
+    except PermissionError as exc:
+        log.warning("[Лор] %s: доступ запрещён — %s. Лор не сохранён.", label, exc)
+        return None
+    except Exception as exc:
+        log.warning("[Лор] Провайдер %s недоступен: %s", label, exc)
+        return None
+    finally:
+        provider.close()
+
+    elapsed = time.monotonic() - started
+    log.info("[Лор] Модель %s ответила за %.2f с.", model, elapsed)
+    return content or None
 
 
 def _parse_lore_json(raw, expected_name=""):

@@ -27,6 +27,12 @@ OPTIONS = {
     "presence_penalty": 0.0
 }
 
+# Повтор при HTTP 429 (превышен лимит запросов). Если сервер просит подождать
+# не дольше этого порога (секунды) — перевод делает ОДИН повтор запроса.
+# Если просит дольше — сразу возвращается понятное сообщение, чтобы не
+# замораживать оверлей поверх игры на десятки секунд. См. brain/providers.py.
+MAX_RETRY_WAIT_SECONDS = 5
+
 CHARACTER_PROMPT = """
 Analyze the following dialogue. Identify the name of the character who is speaking.
 Based on their speech, write a 1-sentence description of their personality, tone, or role in Russian.
