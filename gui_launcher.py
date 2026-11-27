@@ -379,14 +379,44 @@ PROVIDER_LABELS = {
 }
 PROVIDER_KEYS = {v: k for k, v in PROVIDER_LABELS.items()}
 
-# Доступные модели Ollama: имя -> подпись для выпадающего списка.
+# Доступные модели Ollama. Один список-источник правды: из него строятся
+# подписи для выпадающего меню, проверка «модель из списка» и подсказка о типе.
+#
+# kind: "переводчик" — специализированная модель перевода (translategemma);
+#       "универсальная" — общая модель (qwen2.5 и подобные): может быть живее
+#       в разговоре, но хуже держит формат и род (проверено на qwen2.5:3b).
+# size — примерный объём памяти, нужный модели (не размер загрузки).
+OLLAMA_MODEL_CATALOG = (
+    {"model": "qwen2.5:3b", "tier": "Лёгкая", "size": "4 ГБ", "kind": "универсальная"},
+    {"model": "translategemma:4b", "tier": "Баланс", "size": "6–8 ГБ", "kind": "переводчик"},
+    {"model": "translategemma:12b", "tier": "Мощная", "size": "12 ГБ", "kind": "переводчик"},
+    {
+        "model": "translategemma:12b-it-q8_0",
+        "tier": "Максимум",
+        "size": "16 ГБ",
+        "kind": "переводчик",
+    },
+)
+
+#: Модель по умолчанию, если в настройках лежит что-то неизвестное.
+DEFAULT_OLLAMA_MODEL = "translategemma:4b"
+
+
+def _ollama_model_label(item):
+    """Подпись пункта меню: «translategemma:4b (Баланс / 6–8 ГБ)»."""
+    return f"{item['model']} ({item['tier']} / {item['size']})"
+
+
+# Имя модели -> подпись для выпадающего списка (порядок каталога сохраняется).
 OLLAMA_MODELS = {
-    "qwen2.5:3b": "qwen2.5:3b (Слабая / Быстрая)",
-    "translategemma:4b": "translategemma:4b (Средняя / Баланс)",
-    "gemma2:9b": "gemma2:9b (Мощная / Умная)",
+    item["model"]: _ollama_model_label(item) for item in OLLAMA_MODEL_CATALOG
 }
-OLLAMA_MODEL_LABELS = list(OLLAMA_MODELS.values())
-MODEL_BY_LABEL = {v: k for k, v in OLLAMA_MODELS.items()}
+OLLAMA_MODEL_LABELS = [OLLAMA_MODELS[item["model"]] for item in OLLAMA_MODEL_CATALOG]
+MODEL_BY_LABEL = {label: model for model, label in OLLAMA_MODELS.items()}
+#: Тип модели («переводчик» / «универсальная») — для подсказки в интерфейсе.
+OLLAMA_MODEL_KINDS = {
+    item["model"]: item["kind"] for item in OLLAMA_MODEL_CATALOG
+}
 
 POSITION_LABELS = {
     "Сверху по центру": "top-center",
@@ -993,7 +1023,7 @@ class TranslatorLauncher(ctk.CTk):
         merged.update({
             "provider": self._provider(),
             "api_key": self.api_key_var.get().strip(),
-            "ollama_model": self.ollama_model_var.get().strip() or "translategemma:4b",
+            "ollama_model": self.ollama_model_var.get().strip() or DEFAULT_OLLAMA_MODEL,
             "deepseek_model": self.deepseek_model_var.get().strip() or "deepseek-chat",
             "launcher_theme": self._theme,
             "create_shortcut": bool(self.create_shortcut_var.get()),
@@ -1052,7 +1082,9 @@ class TranslatorLauncher(ctk.CTk):
             self.hint.configure(
                 text="Ollama работает локально и не требует ключа. Убедись, что "
                      "сервис Ollama запущен (порт 11434). Лор персонажей считает "
-                     "эта же модель."
+                     "эта же модель. translategemma — специализированные модели "
+                     "перевода, qwen2.5 — универсальная: быстрее, но слабее в лоре "
+                     "и роде."
             )
 
         # Баннер про Ollama: показать/скрыть и при необходимости проверить заново.
@@ -1075,13 +1107,13 @@ class TranslatorLauncher(ctk.CTk):
 
     # ------------------------------------------------ Ollama: модель и скачивание
     def _preselect_ollama_model(self):
-        model = self.settings.get("ollama_model", "translategemma:4b")
-        label = OLLAMA_MODELS.get(model)
-        if label is None:
-            model = "translategemma:4b"
-            label = OLLAMA_MODELS.get(model, OLLAMA_MODEL_LABELS[0])
+        model = self.settings.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+        if model not in OLLAMA_MODELS:
+            # В старых настройках могла остаться модель, которой больше нет в
+            # списке (например gemma2:9b) — молча переходим на «Баланс».
+            model = DEFAULT_OLLAMA_MODEL
         self.ollama_model_var.set(model)
-        self.ollama_menu.set(label)
+        self.ollama_menu.set(OLLAMA_MODELS[model])
 
     def _on_ollama_model_changed(self, label):
         model = MODEL_BY_LABEL.get(label)
@@ -1106,7 +1138,13 @@ class TranslatorLauncher(ctk.CTk):
 
     def _on_model_checked(self, model, installed):
         if installed:
-            self._set_status(f"Модель {model} готова к использованию.", kind="ok")
+            model_kind = OLLAMA_MODEL_KINDS.get(model, "")
+            note = (
+                " Это универсальная модель: лор и род могут определяться хуже."
+                if model_kind == "универсальная"
+                else ""
+            )
+            self._set_status(f"Модель {model} готова к использованию.{note}", kind="ok")
         else:
             self._set_status(f"Модели {model} нет — начинаю загрузку.", kind="info")
             self._start_model_download()

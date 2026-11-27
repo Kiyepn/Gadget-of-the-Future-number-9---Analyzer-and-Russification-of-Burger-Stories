@@ -1,5 +1,5 @@
 ﻿# build.ps1
-# Сборка «Гаджет Будущего» v1.5.2 (Lightweight) в .exe (--onedir).
+# Сборка «Гаджет Будущего» v1.6.0 (Lightweight) в .exe (--onedir).
 #
 # Запускается через build.bat (ASCII-обёртка). Логика внутри PowerShell, а не
 # cmd, по важной причине: cmd.exe разбирает .bat в текущей кодовой странице
@@ -37,7 +37,7 @@ try {
 }
 
 $AppName = "GadgetOfTheFuture"
-$Version = "v1.5.2"
+$Version = "v1.6.0"
 $SizeLimitMb = 100
 
 function Stop-WithError([string]$Message) {

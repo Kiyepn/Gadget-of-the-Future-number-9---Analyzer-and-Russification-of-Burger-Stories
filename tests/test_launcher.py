@@ -50,6 +50,123 @@ class ModelNameTests(unittest.TestCase):
         self.assertFalse(launcher.model_names_match("", "qwen2.5:3b"))
 
 
+class OllamaModelCatalogTests(unittest.TestCase):
+    """Каталог моделей: четыре варианта, подписи, типы, значения по умолчанию."""
+
+    EXPECTED = {
+        "qwen2.5:3b": "qwen2.5:3b (Лёгкая / 4 ГБ)",
+        "translategemma:4b": "translategemma:4b (Баланс / 6–8 ГБ)",
+        "translategemma:12b": "translategemma:12b (Мощная / 12 ГБ)",
+        "translategemma:12b-it-q8_0": "translategemma:12b-it-q8_0 (Максимум / 16 ГБ)",
+    }
+
+    def test_requested_variants_are_in_catalog(self):
+        self.assertEqual(set(launcher.OLLAMA_MODELS), set(self.EXPECTED))
+        self.assertEqual(launcher.OLLAMA_MODEL_LABELS, list(self.EXPECTED.values()))
+
+    def test_labels_show_tier_and_size(self):
+        for label in launcher.OLLAMA_MODEL_LABELS:
+            self.assertIn("(", label)
+            self.assertIn(" / ", label)
+
+    def test_label_roundtrip(self):
+        for model, label in self.EXPECTED.items():
+            self.assertEqual(launcher.MODEL_BY_LABEL[label], model)
+
+    def test_model_kinds(self):
+        self.assertEqual(launcher.OLLAMA_MODEL_KINDS["qwen2.5:3b"], "универсальная")
+        for model in (
+            "translategemma:4b",
+            "translategemma:12b",
+            "translategemma:12b-it-q8_0",
+        ):
+            self.assertEqual(launcher.OLLAMA_MODEL_KINDS[model], "переводчик")
+
+    def test_default_model_is_in_catalog(self):
+        self.assertIn(launcher.DEFAULT_OLLAMA_MODEL, launcher.OLLAMA_MODELS)
+
+
+class OllamaModelSelectionTests(unittest.TestCase):
+    """Выбор модели: восстановление из настроек и реакция на смену пункта меню."""
+
+    def _stub(self, model):
+        stub = type("Stub", (), {})()
+        stub.settings = {"ollama_model": model}
+        stub.ollama_model_var = mock.Mock()
+        stub.ollama_menu = mock.Mock()
+        stub._schedule_persist = mock.Mock()
+        stub._set_status = mock.Mock()
+        stub._check_ollama_async = mock.Mock()
+        return stub
+
+    def test_saved_model_is_preserved(self):
+        stub = self._stub("translategemma:12b")
+        launcher.TranslatorLauncher._preselect_ollama_model(stub)
+        stub.ollama_model_var.set.assert_called_once_with("translategemma:12b")
+        stub.ollama_menu.set.assert_called_once_with(
+            launcher.OLLAMA_MODELS["translategemma:12b"]
+        )
+
+    def test_legacy_model_falls_back_to_default(self):
+        # gemma2:9b убран из списка — старые настройки не должны ломать лаунчер.
+        stub = self._stub("gemma2:9b")
+        launcher.TranslatorLauncher._preselect_ollama_model(stub)
+        stub.ollama_model_var.set.assert_called_once_with(
+            launcher.DEFAULT_OLLAMA_MODEL
+        )
+        stub.ollama_menu.set.assert_called_once_with(
+            launcher.OLLAMA_MODELS[launcher.DEFAULT_OLLAMA_MODEL]
+        )
+
+    def test_menu_selection_maps_label_to_model(self):
+        stub = self._stub("translategemma:4b")
+        label = launcher.OLLAMA_MODELS["translategemma:12b-it-q8_0"]
+        launcher.TranslatorLauncher._on_ollama_model_changed(stub, label)
+        stub.ollama_model_var.set.assert_called_once_with(
+            "translategemma:12b-it-q8_0"
+        )
+        stub._schedule_persist.assert_called_once()
+        stub._check_ollama_async.assert_called_once()
+
+    def test_unknown_label_is_ignored(self):
+        stub = self._stub("translategemma:4b")
+        launcher.TranslatorLauncher._on_ollama_model_changed(stub, "чушь")
+        stub.ollama_model_var.set.assert_not_called()
+        stub._check_ollama_async.assert_not_called()
+
+
+class OllamaModelStatusTests(unittest.TestCase):
+    """Статус после проверки модели: универсальную помечаем предупреждением."""
+
+    def _stub(self):
+        stub = type("Stub", (), {})()
+        stub.status = None
+        stub._set_status = lambda text, kind="info": setattr(stub, "status", text)
+        stub._start_model_download = mock.Mock()
+        return stub
+
+    def test_universal_model_gets_note(self):
+        stub = self._stub()
+        launcher.TranslatorLauncher._on_model_checked(stub, "qwen2.5:3b", True)
+        self.assertIn("qwen2.5:3b", stub.status)
+        self.assertIn("универсальная", stub.status)
+        stub._start_model_download.assert_not_called()
+
+    def test_translator_model_has_no_note(self):
+        stub = self._stub()
+        launcher.TranslatorLauncher._on_model_checked(
+            stub, "translategemma:12b", True
+        )
+        self.assertIn("готова", stub.status)
+        self.assertNotIn("универсальная", stub.status)
+
+    def test_missing_model_starts_download(self):
+        stub = self._stub()
+        launcher.TranslatorLauncher._on_model_checked(stub, "translategemma:12b", False)
+        self.assertIn("начинаю загрузку", stub.status)
+        stub._start_model_download.assert_called_once()
+
+
 class FormatBytesTests(unittest.TestCase):
     def test_units(self):
         self.assertEqual(launcher.format_bytes(0), "0 Б")

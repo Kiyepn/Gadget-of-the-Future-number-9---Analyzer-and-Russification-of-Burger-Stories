@@ -124,7 +124,7 @@ DeepSeek облако) — с жёстким лимитом в 1 предлож�
 build.bat
 ```
 Результат: `dist\GadgetOfTheFuture\GadgetOfTheFuture.exe` и готовый архив
-`dist\GadgetOfTheFuture-v1.5.0.zip` (+ `.sha256`). Сборка **не** запрашивает права
+`dist\GadgetOfTheFuture-v1.6.0.zip` (+ `.sha256`). Сборка **не** запрашивает права
 администратора — это обязательное условие работы оверлея.
 
 В v1.5.0 сборка вынесена в `build.ps1` (у `build.bat` только обёртка: cmd.exe ломает

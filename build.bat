@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  GadgetOfTheFuture - launcher for build.ps1 (v1.5.0-beta, Lightweight)
+REM  GadgetOfTheFuture - launcher for build.ps1 (v1.6.0, Lightweight)
 REM
 REM  This file is intentionally ASCII-only: cmd.exe parses .bat files
 REM  using the current console code page, and a "chcp" switch inside a
