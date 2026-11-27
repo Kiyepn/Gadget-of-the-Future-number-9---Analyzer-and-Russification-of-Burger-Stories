@@ -273,10 +273,15 @@ class DeepSeekTranslationErrorTests(unittest.TestCase):
 class BackgroundAnalyzeTests(unittest.TestCase):
     def setUp(self):
         self.saved = {}
-        patcher = mock.patch.object(
-            llm, "save_character",
-            side_effect=lambda name, desc: self.saved.__setitem__(name, desc),
-        )
+
+        def _save(name, description=None, card=None):
+            """Запоминаем описание — оно приходит либо аргументом, либо в карточке."""
+            if description is None and isinstance(card, dict):
+                description = card.get("description")
+            self.saved[name] = description
+            return True
+
+        patcher = mock.patch.object(llm, "save_character", side_effect=_save)
         patcher.start()
         self.addCleanup(patcher.stop)
 

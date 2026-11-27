@@ -156,7 +156,11 @@ class MemoryTests(TempDataDirCase):
     def test_character_saved_once(self):
         self.assertTrue(memory_engine.save_character("Robert", "Механик"))
         self.assertFalse(memory_engine.save_character("Robert", "Другое"))
-        self.assertEqual(memory_engine.load_characters()["Robert"], "Механик")
+        card = memory_engine.load_characters()["Robert"]
+        # В 1.6.0 значение — карточка, а не строка.
+        self.assertEqual(card["description"], "Механик")
+        self.assertEqual(card["gender"], "unknown")
+        self.assertEqual(card["address"], "ty")
 
     def test_prompt_format_uses_saved_memory(self):
         memory_engine.clear_memory()

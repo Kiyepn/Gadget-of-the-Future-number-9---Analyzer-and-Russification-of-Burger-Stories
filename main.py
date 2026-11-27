@@ -606,6 +606,28 @@ def _translator_with_provider(translate, settings):
     return _translate
 
 
+def _migrate_character_cards():
+    """Одноразовая миграция characters.json на карточки персонажей.
+
+    Старое описание-строка становится полем description; перед перезаписью
+    создаётся бэкап файла, поэтому данные пользователя не теряются.
+    """
+    from brain.memory_engine import migrate_characters_file
+
+    try:
+        migrated, backup = migrate_characters_file()
+    except Exception:
+        log.exception("Не удалось мигрировать characters.json на карточки")
+        return
+
+    if migrated:
+        log.info(
+            "[Лор] characters.json переведён на карточки: %d записей (бэкап: %s).",
+            migrated,
+            os.path.basename(backup) if backup else "не удалось создать",
+        )
+
+
 def _run_translator(args):
     global _overlay, _mutex_handle
 
@@ -625,6 +647,8 @@ def _run_translator(args):
         if args.no_overlay:
             print("Приложение уже запущено.")
         return 0
+
+    _migrate_character_cards()
 
     hotkeys = None
     close_translate = None

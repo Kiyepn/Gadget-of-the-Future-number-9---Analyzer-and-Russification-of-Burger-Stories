@@ -8,7 +8,16 @@ import threading
 import re
 from brain.paths import config_path as app_config_path
 from brain.paths import data_file, ensure_data_dir, load_config
-from brain.memory_engine import format_memory_for_prompt, save_memory, format_characters_for_prompt, save_character, load_characters
+from brain.memory_engine import (
+    DEFAULT_CHARACTER_CARD,
+    format_memory_for_prompt,
+    save_memory,
+    format_characters_for_prompt,
+    get_character_card,
+    normalize_character_card,
+    save_character,
+    load_characters,
+)
 from brain import web_search
 from brain.settings import load_settings
 from brain.providers import (
@@ -128,15 +137,76 @@ def _get_web_context(text):
     return web_search.format_context(context_map)
 
 
+# Имя говорящего в OCR-строке: «Name:», «Me:» и «I ...» — внутренний голос.
+_SPEAKER_RE = re.compile(r"^([A-Za-z]{2,15}(?:\s[A-Z][a-z]+)?):")
+_GARBAGE_NAMES = {"surprisingly", "suddenly", "however"}
+
+
+def speaker_from_text(text):
+    """Определяет говорящего по строке OCR. Возвращает имя или None.
+
+    «Me:» и строки от первого лица («I ...») — это внутренний голос, он
+    переводится как «Я:» и хранится в лоре под именем «Я».
+    """
+    value = str(text or "").strip()
+    if not value:
+        return None
+
+    lowered = value.lower()
+    if lowered.startswith("me ") or lowered.startswith("me:") or lowered.startswith("i "):
+        return "Я"
+
+    match = _SPEAKER_RE.match(value)
+    if not match:
+        return None
+
+    name = match.group(1).strip()
+    if not name or len(name) > 20 or name.lower() in _GARBAGE_NAMES:
+        return None
+    return name
+
+
+def _format_speaker_card(name, card):
+    """Блок «карточка говорящего» для промпта перевода."""
+    card = normalize_character_card(card)
+    address_label = "ты" if card["address"] == "ty" else "вы"
+    manner = card.get("manner") or "не указана"
+    return (
+        "SPEAKER CARD (обязательно учитывай при переводе):\n"
+        f"- Говорящий: {name or 'неизвестен'}\n"
+        f"- Пол: {card['gender']}\n"
+        f"- Обращение к собеседнику: {address_label} ({card['address']})\n"
+        f"- Манера речи: {manner}\n"
+        "Правила карточки:\n"
+        "1. Строго используй род из карточки (male — «он сказал», female — «она сказала»).\n"
+        "2. Строго используй обращение: ty — «ты», vy — «вы».\n"
+        "3. Учитывай манеру речи при выборе слов и интонации.\n"
+        "4. Если пол unknown — не выдумывай род: по возможности избегай форм "
+        "прошедшего времени, требующих рода."
+    )
+
+
 def _build_translation_prompt(text):
     """Собирает системную и пользовательскую части промпта перевода."""
+    # Карточки читаем один раз на кадр: их используют и блок говорящего, и лор.
+    characters = load_characters()
+
     context = format_memory_for_prompt()
-    lore = format_characters_for_prompt()
+    lore = format_characters_for_prompt(characters)
     glossary = format_glossary_for_prompt()
     web_context = _get_web_context(text)
 
+    speaker = speaker_from_text(text)
+    card = (
+        get_character_card(speaker, characters)
+        if speaker
+        else dict(DEFAULT_CHARACTER_CARD)
+    )
+    speaker_block = _format_speaker_card(speaker, card)
+
     system = f"{config.SYSTEM_PROMPT}\n\n{ANTI_HALLUCINATION_RULES}"
     user = (
+        f"{speaker_block}\n\n"
         f"{glossary}\n\n"
         f"{web_context}\n\n"
         f"{lore}\n\n"
@@ -506,60 +576,99 @@ def _lore_completion(prompt, model_config, timeout=60):
     return content or None
 
 
-def _parse_lore_json(raw, expected_name=""):
-    """Достаёт {имя: описание} из ответа модели (учитывает ```json-обёртку)."""
+# Модели любят вернуть сам шаблон из промпта вместо описания.
+_LORE_PLACEHOLDERS = {
+    "описание на русском",
+    "описание на русском.",
+    "короткое описание на русском.",
+    "краткое описание",
+    "описание",
+    "description",
+    "описание персонажа",
+}
+# qwen2.5:3b иногда подмешивает китайские/японские символы в русский ответ —
+# такое описание лучше не сохранять, чем потом показывать в лоре.
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+
+
+def _extract_json_dict(raw):
+    """Достаёт JSON-объект из ответа модели (учитывает ```json-обёртку)."""
     if not raw:
-        return {}
+        return None
     cleaned = str(raw).replace("```json", "").replace("```", "").strip()
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start == -1 or end <= start:
-        return {}
+        return None
     try:
         data = json.loads(cleaned[start:end + 1])
     except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
+        return None
+    return data if isinstance(data, dict) else None
 
-    # Модели любят вернуть сам шаблон из промпта вместо описания.
-    placeholders = {
-        "описание на русском",
-        "описание на русском.",
-        "короткое описание на русском.",
-        "краткое описание",
-        "описание",
-        "description",
-        "описание персонажа",
-    }
-    # qwen2.5:3b иногда подмешивает китайские/японские символы в русский ответ —
-    # такое описание лучше не сохранять, чем потом показывать в лоре.
-    cjk = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+
+def _parse_character_cards(raw, expected_name=""):
+    """Достаёт {имя: карточка} из ответа модели.
+
+    Понимает и старый формат значения-строки — она становится ``description``,
+    остальные поля получают значения по умолчанию.
+    """
+    data = _extract_json_dict(raw)
+    if data is None:
+        return {}
 
     result = {}
-    for char_name, desc in data.items():
+    for char_name, value in data.items():
         char_name = str(char_name).strip()
-        desc = str(desc).strip()
-        if not char_name or not desc:
+        if not char_name:
             continue
-        if desc in ("{}", "[]", "null", "None"):
+
+        card = normalize_character_card(value)
+        desc = card["description"]
+        if not desc or desc in ("{}", "[]", "null", "None"):
             continue
-        if desc.lower() in placeholders or len(desc) < 6:
+        if desc.lower() in _LORE_PLACEHOLDERS or len(desc) < 6:
             log.info("[Лор] Ответ модели похож на заглушку (%r) — пропускаю.", desc[:40])
             continue
-        if cjk.search(desc):
+        if _CJK_RE.search(desc):
             log.info("[Лор] В описании китайские/японские символы — пропускаю (%r).", desc[:40])
             continue
-        result[char_name] = desc
+
+        # Мусорную манеру выбрасываем, но карточку из-за неё не теряем.
+        if _CJK_RE.search(card.get("manner") or ""):
+            log.info("[Лор] В манере речи китайские/японские символы — очищаю.")
+            card["manner"] = ""
+
+        result[char_name] = card
     return result
 
 
+def _parse_lore_json(raw, expected_name=""):
+    """Совместимость: достаёт {имя: описание} (старый контракт 1.5.2)."""
+    cards = _parse_character_cards(raw, expected_name=expected_name)
+    return {name: card["description"] for name, card in cards.items()}
+
+
 def _build_lore_prompt(name, text):
-    # Формулировка проверена на qwen2.5:3b: мягкий вариант («если не персонаж —
-    # ответь {}») модель понимала слишком буквально и возвращала {} почти всегда,
-    # а вариант с примером иногда просто копировал пример. Этот даёт описание.
+    # Формулировка проверена на qwen2.5:3b: вариант с примером даёт описание,
+    # а строчка «answer {} if not a person» отсекает числа, кнопки и звуки.
     return f'''The line below is spoken by the character "{name}" in a visual novel.
-Based only on this line, write ONE short sentence in RUSSIAN describing their personality, tone or role.
-Reply with ONLY a JSON object, no explanations: {{"{name}": "описание на русском"}}
+Based only on this line, extract the following information about {name}:
+- gender: "male" | "female" | "unknown" (infer from context, default to "unknown")
+- pronouns: "he/him" | "she/her" | "they/them" (infer from gender)
+- address: "ty" | "vy" (how they address the listener: informal "ты" or formal "вы")
+- manner: ONE short phrase in RUSSIAN describing their speaking style
+- description: ONE short sentence in RUSSIAN describing their personality or role
+
+Reply with ONLY a JSON object in this exact format:
+{{
+  "{name}": {{
+    "gender": "female",
+    "pronouns": "she/her",
+    "address": "ty",
+    "manner": "мягкая, меланхоличная",
+    "description": "Хранительница маяка"
+  }}
+}}
 Answer {{}} ONLY if "{name}" is clearly not a person (an object, a number, a UI button or a sound).
 Line: "{text}"'''
 
@@ -596,7 +705,7 @@ def background_analyze(name, text, model_config=None):
         )
         raw = _lore_completion(_build_lore_prompt(name, text), config_used)
         total_elapsed = time.monotonic() - started
-        parsed = _parse_lore_json(raw, expected_name=name)
+        parsed = _parse_character_cards(raw, expected_name=name)
         if not parsed:
             log.info(
                 "[Лор] Модель %s не дала описания для «%s» — пропускаю (всего %.2f с).",
@@ -606,12 +715,14 @@ def background_analyze(name, text, model_config=None):
             )
             return
 
-        for char_name, desc in parsed.items():
-            save_character(char_name, desc)
+        for char_name, card in parsed.items():
+            save_character(char_name, card=card)
             log.info(
-                "[Лор] Записан: %s — %s (модель %s, всего %.2f с)",
+                "[Лор] Записан: %s — %s (пол: %s, обращение: %s, модель %s, всего %.2f с)",
                 char_name,
-                desc,
+                card["description"],
+                card["gender"],
+                card["address"],
                 config_used.get("model"),
                 total_elapsed,
             )
@@ -620,56 +731,38 @@ def background_analyze(name, text, model_config=None):
 
 
 def analyze_character(text, settings=None):
-    """Ищет имена только с двоеточием или четко определяет внутренний голос"""
-    import re
+    """Ищет имена только с двоеточием или четко определяет внутренний голос."""
+    name = speaker_from_text(text)
+    if not name:
+        return
 
-    name = None
-    text_lower = text.lower()
+    chars = load_characters()
+    # Если мы еще не знаем этого персонажа, запускаем анализ.
+    if name in chars:
+        return
 
-    # 1. Если текст начинается с "Me" или "I " - это внутренний голос.
-    #    "Me:" тоже внутренний голос: в промпте перевода он становится "Я:".
-    if (
-        text_lower.startswith("me ")
-        or text_lower.startswith("me:")
-        or text_lower.startswith("i ")
-    ):
-        name = "Я"
-    else:
-        # 2. Ищем строго "Имя:" (только одно слово или два, но с двоеточием)
-        match = re.match(r"^([A-Za-z]{2,15}(?:\s[A-Z][a-z]+)?):", text)
-        if match:
-            name = match.group(1).strip()
+    # Не анализируем повторно: имя уже в работе или проверяли недавно.
+    if _lore_should_skip(name):
+        return
 
-    if name:
-        chars = load_characters()
-        # Если мы еще не знаем этого персонажа, запускаем анализ
-        if name not in chars:
-            # Защита от мусора
-            if len(name) > 20 or name.lower() in ["surprisingly", "suddenly", "however"]:
-                return
+    # Модель для лора = модель перевода (см. lore_model_config).
+    try:
+        model_config = lore_model_config(settings)
+    except Exception as exc:
+        log.warning("[Лор] Не удалось определить модель для лора: %s", exc)
+        model_config = None
 
-            # Не анализируем повторно: имя уже в работе или проверяли недавно.
-            if _lore_should_skip(name):
-                return
-
-            # Модель для лора = модель перевода (см. lore_model_config).
-            try:
-                model_config = lore_model_config(settings)
-            except Exception as exc:
-                log.warning("[Лор] Не удалось определить модель для лора: %s", exc)
-                model_config = None
-
-            log.info(
-                "[Лор] Обнаружен новый персонаж: %s. Ищу описание (модель: %s)...",
-                name,
-                (model_config or {}).get("model", "неизвестно"),
-            )
-            _lore_mark_inflight(name)
-            try:
-                thread = threading.Thread(
-                    target=background_analyze, args=(name, text, model_config), daemon=True
-                )
-                thread.start()
-            except Exception:
-                _lore_release(name)
-                raise
+    log.info(
+        "[Лор] Обнаружен новый персонаж: %s. Ищу описание (модель: %s)...",
+        name,
+        (model_config or {}).get("model", "неизвестно"),
+    )
+    _lore_mark_inflight(name)
+    try:
+        thread = threading.Thread(
+            target=background_analyze, args=(name, text, model_config), daemon=True
+        )
+        thread.start()
+    except Exception:
+        _lore_release(name)
+        raise
